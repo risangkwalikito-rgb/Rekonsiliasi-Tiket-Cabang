@@ -1,11 +1,12 @@
 # app.py
 # -*- coding: utf-8 -*-
 """
-Rekonsiliasi: Tiket Detail Espay vs Settlement Dana Espay
-- Parameter tanggal = Bulan & Tahun; hasil selalu 1..akhir bulan itu
+Rekonsiliasi: Tiket Detail vs Settlement Dana
+- Parameter bulan & tahun → kolom Tanggal selalu 1..akhir bulan
 - Multi-file upload (Tiket Excel; Settlement CSV/Excel)
 - Parser uang/tanggal robust (format Eropa & serial Excel)
-- Tiket difilter: St Bayar='paid' & Bank='ESPAY'
+- Tiket: filter St Bayar='paid' & Bank='ESPAY'
+- Tambahan tabel: Settlement Dana BCA (Product Name='BCA VA Online') & Non-BCA
 """
 
 from __future__ import annotations
@@ -200,10 +201,9 @@ with st.sidebar:
 
     st.header("2) Parameter Bulan & Tahun (WAJIB)")
     y, m = _month_selector()
-    # Hari pertama & terakhir bulan
     month_start = pd.Timestamp(y, m, 1)
     month_end = pd.Timestamp(y, m, calendar.monthrange(y, m)[1])
-    st.caption(f"Periode dipakai: {month_start.date()} s/d {month_end.date()}")
+    st.caption(f"Periode: {month_start.date()} s/d {month_end.date()}")
 
     st.header("3) Opsi")
     show_preview = st.checkbox("Tampilkan pratinjau", value=False)
@@ -221,7 +221,7 @@ if show_preview:
         st.markdown(f"Settlement Dana (rows: {len(settle_df)})"); st.dataframe(settle_df.head(50), use_container_width=True)
 
 if go:
-    # Mapping tetap sesuai spesifikasi
+    # Mapping tetap
     t_date = _find_col(tiket_df, ["Action date"])
     t_amt  = _find_col(tiket_df, ["tarif"])
     t_stat = _find_col(tiket_df, ["St Bayar", "Status Bayar", "status"])
@@ -229,6 +229,7 @@ if go:
 
     s_date = _find_col(settle_df, ["Transaction Date"])
     s_amt  = _find_col(settle_df, ["Settlement Amount"])
+    s_prod = _find_col(settle_df, ["Product Name", "Product", "Nama Produk"])
 
     missing = []
     for name, col, src in [
@@ -238,6 +239,7 @@ if go:
         ("Bank", t_bank, "Tiket Detail"),
         ("Transaction Date", s_date, "Settlement Dana"),
         ("Settlement Amount", s_amt, "Settlement Dana"),
+        ("Product Name", s_prod, "Settlement Dana"),
     ]:
         if col is None:
             missing.append(f"{src}: {name}")
@@ -249,16 +251,17 @@ if go:
     td = tiket_df.copy()
     td[t_date] = td[t_date].apply(_to_date)
     td = td[~td[t_date].isna()]
+
     td_stat = td[t_stat].astype(str).str.strip().str.lower()
     td_bank = td[t_bank].astype(str).str.strip().str.lower()
     td = td[td_stat.eq("paid") & td_bank.eq("espay")]
-    # keep only rows inside chosen month
+
     td = td[(td[t_date] >= month_start) & (td[t_date] <= month_end)]
     td[t_amt] = _to_num(td[t_amt])
     tiket_by_date = td.groupby(td[t_date])[t_amt].sum()
     tiket_by_date.index = pd.to_datetime(tiket_by_date.index).date
 
-    # --- Settlement Dana ---
+    # --- Settlement Dana (ALL) ---
     sd = settle_df.copy()
     sd[s_date] = sd[s_date].apply(_to_date)
     sd = sd[~sd[s_date].isna()]
@@ -266,42 +269,81 @@ if go:
     if show_debug:
         st.info(f"Contoh Settlement Amount (raw → parsed): {sd[s_amt].head(3).tolist()} → {_to_num(sd[s_amt].head(3)).tolist()}")
     sd[s_amt] = _to_num(sd[s_amt])
-    settle_by_date = sd.groupby(sd[s_date])[s_amt].sum()
-    settle_by_date.index = pd.to_datetime(settle_by_date.index).date
 
-    # --- Index tanggal dari parameter (1..akhir bulan) ---
+    # Split Product: BCA vs Non-BCA
+    prod_norm = sd[s_prod].astype(str).str.strip().str.lower()
+    bca_mask = prod_norm.eq("bca va online")  # exact ignore-case
+    # rekap total
+    settle_all_by_date = sd.groupby(sd[s_date])[s_amt].sum()
+    settle_all_by_date.index = pd.to_datetime(settle_all_by_date.index).date
+
+    settle_bca_by_date = sd[bca_mask].groupby(sd[bca_mask][s_date])[s_amt].sum() if bca_mask.any() else pd.Series(dtype=float)
+    settle_bca_by_date.index = pd.to_datetime(settle_bca_by_date.index).date if len(settle_bca_by_date.index) else settle_bca_by_date.index
+
+    settle_nonbca_by_date = sd[~bca_mask].groupby(sd[~bca_mask][s_date])[s_amt].sum() if (~bca_mask).any() else pd.Series(dtype=float)
+    settle_nonbca_by_date.index = pd.to_datetime(settle_nonbca_by_date.index).date if len(settle_nonbca_by_date.index) else settle_nonbca_by_date.index
+
+    # --- Index tanggal 1..akhir bulan ---
     idx = pd.Index(pd.date_range(month_start, month_end, freq="D").date, name="Tanggal")
-    tiket_series = tiket_by_date.reindex(idx, fill_value=0.0)
-    settle_series = settle_by_date.reindex(idx, fill_value=0.0)
 
+    def _reidx(s: pd.Series) -> pd.Series:
+        if not isinstance(s, pd.Series):
+            s = pd.Series(dtype=float)
+        return s.reindex(idx, fill_value=0.0)
+
+    tiket_series       = _reidx(tiket_by_date)
+    settle_series      = _reidx(settle_all_by_date)
+    settle_bca_series  = _reidx(settle_bca_by_date)
+    settle_nonbca_series = _reidx(settle_nonbca_by_date)
+
+    # --- Tabel Utama ---
     final = pd.DataFrame(index=idx)
     final["Tiket Detail"] = tiket_series.values
     final["Settlement Dana"] = settle_series.values
     final["Selisih"] = final["Tiket Detail"] - final["Settlement Dana"]
 
-    # View + total
     view = final.reset_index()
     view.insert(0, "No", range(1, len(view) + 1))
-    total_row = pd.DataFrame(
-        [{"No": "", "Tanggal": "TOTAL",
-          "Tiket Detail": final["Tiket Detail"].sum(),
-          "Settlement Dana": final["Settlement Dana"].sum(),
-          "Selisih": final["Selisih"].sum()}]
-    )
+    total_row = pd.DataFrame([{
+        "No": "", "Tanggal": "TOTAL",
+        "Tiket Detail": final["Tiket Detail"].sum(),
+        "Settlement Dana": final["Settlement Dana"].sum(),
+        "Selisih": final["Selisih"].sum()
+    }])
     view_total = pd.concat([view, total_row], ignore_index=True)
 
     fmt = view_total.copy()
     for c in ["Tiket Detail", "Settlement Dana", "Selisih"]:
         fmt[c] = fmt[c].apply(_idr_fmt)
 
-    st.subheader("Hasil Rekonsiliasi per Tanggal (mengikuti bulan parameter)")
+    st.subheader("Hasil Rekonsiliasi per Tanggal (berdasarkan bulan parameter)")
     st.dataframe(fmt, use_container_width=True, hide_index=True)
 
-    # Export
+    # --- Tabel Tambahan: Settlement BCA & Non-BCA ---
+    tbl_bca = pd.DataFrame({"Tanggal": idx, "Settlement Dana BCA": settle_bca_series.values})
+    tbl_nonbca = pd.DataFrame({"Tanggal": idx, "Settlement Dana Non BCA": settle_nonbca_series.values})
+
+    tbl_bca_view = tbl_bca.copy();    tbl_bca_view["Settlement Dana BCA"] = tbl_bca_view["Settlement Dana BCA"].apply(_idr_fmt)
+    tbl_nonbca_view = tbl_nonbca.copy(); tbl_nonbca_view["Settlement Dana Non BCA"] = tbl_nonbca_view["Settlement Dana Non BCA"].apply(_idr_fmt)
+
+    st.subheader("Tabel Settlement Dana BCA (Product Name = 'BCA VA Online')")
+    st.dataframe(tbl_bca_view, use_container_width=True, hide_index=True)
+
+    st.subheader("Tabel Settlement Dana Non BCA (selain 'BCA VA Online')")
+    st.dataframe(tbl_nonbca_view, use_container_width=True, hide_index=True)
+
+    # --- Export Excel ---
     bio = io.BytesIO()
     with pd.ExcelWriter(bio, engine="openpyxl") as xw:
+        # data numeric
         view_total.to_excel(xw, index=False, sheet_name="Rekonsiliasi")
+        tbl_bca.to_excel(xw, index=False, sheet_name="Settl_BCA")
+        tbl_nonbca.to_excel(xw, index=False, sheet_name="Settl_NonBCA")
+        # view formatted
         fmt.to_excel(xw, index=False, sheet_name="Rekonsiliasi_View")
+        tbl_bca_view.to_excel(xw, index=False, sheet_name="Settl_BCA_View")
+        tbl_nonbca_view.to_excel(xw, index=False, sheet_name="Settl_NonBCA_View")
+
     st.download_button(
         "Unduh Excel",
         data=bio.getvalue(),
