@@ -1,7 +1,7 @@
 # app.py
 # -*- coding: utf-8 -*-
 """
-Rekonsiliasi: Tiket Detail vs Settlement Dana
+Rekonsiliasi: Tiket Detail Espay vs Settlement Dana Espay
 - Parameter tanggal = Bulan & Tahun; hasil selalu 1..akhir bulan itu
 - Multi-file upload (Tiket Excel; Settlement CSV/Excel)
 - Parser uang/tanggal robust (format Eropa & serial Excel)
