@@ -1,3 +1,9 @@
+# ===============================
+# File: app.py
+# (save as UTF-8)
+# ===============================
+# -*- coding: utf-8 -*-
+"""
 #Streamlit app: Rekonsiliasi Otomatis (Tiket Detail • Settlement • Rekening Koran)#
 
 Fungsi:
@@ -299,3 +305,90 @@ if go:
     )
 
     st.caption("Tips: sesuaikan Kata Kunci & Mapping jika label bank/channel berbeda.")
+
+
+# ===============================
+# File: readme.txt
+# ===============================
+# Simpan konten ini sebagai readme.txt (UTF-8)
+
+"""
+Rekonsiliasi Otomatis — Tiket Detail • Settlement • Rekening Koran
+==================================================================
+
+Deskripsi
+---------
+Aplikasi Streamlit untuk rekonsiliasi otomatis antara:
+1) Excel Tiket Detail,
+2) CSV Settlement dana masuk, dan
+3) Excel Rekening Koran.
+
+Fitur
+-----
+- Upload 3 sumber data di sidebar.
+- Mapping kolom fleksibel (tanggal, amount, channel/bank/keterangan).
+- Normalisasi angka (format Indonesia) & tanggal otomatis.
+- Agregasi per tanggal:
+  * Tiket Detail: ESPAY, Cash
+  * Settlement: ESPAY, BCA, Non-BCA
+  * Uang Masuk (Rekening Koran): BCA, Non-BCA, Cash
+- Hitung selisih & total settlement.
+- Tabel hasil + unduh Excel (dua sheet: angka & tampilan berformat).
+
+Persyaratan
+-----------
+- Python 3.9+ disarankan.
+
+Instalasi
+---------
+1) (Opsional) Buat virtualenv
+2) Install dependensi:
+   pip install streamlit pandas numpy openpyxl python-dateutil
+
+Menjalankan Aplikasi
+--------------------
+streamlit run app.py
+
+Penggunaan
+----------
+1) Upload file:
+   - Tiket Detail (Excel .xls/.xlsx)
+   - Settlement (CSV)
+   - Rekening Koran (Excel .xls/.xlsx)
+2) Mapping kolom per file:
+   - Tanggal: kolom tanggal transaksi.
+   - Amount/Nominal: kolom nilai uang.
+   - Channel/Bank/Keterangan (opsional): kolom teks untuk filter kata kunci.
+3) Atur kata kunci (pisahkan dengan koma, case-insensitive):
+   - ESPAY: contoh "espay, va espay"
+   - CASH: "cash, tunai, setor tunai"
+   - BCA: "bca"
+   - Non-BCA: "non bca, bri, bni, mandiri, cimb, permata, danamon"
+4) Klik "Proses Rekonsiliasi".
+5) Tabel hasil akan muncul; klik "Unduh Excel".
+
+Catatan & Tips
+--------------
+- Jika kolom tidak terdeteksi otomatis, pilih manual di expander "Mapping kolom".
+- Nilai negatif boleh dalam format (1.000) atau -1000.
+- Jika Non-BCA tidak spesifik di data, kosongkan kata kunci Non-BCA untuk memakai fallback "selain BCA".
+- Jika CSV gagal dibaca, simpan ulang sebagai UTF-8.
+
+Struktur Kolom Output
+---------------------
+- No, Tanggal,
+  "Tiket Detail - Espay",
+  "Settlement - ESPAY",
+  "SELISIH TIKET DETAIL - SETTLEMENT",
+  "Tiket Detail Cash",
+  "Settlement - BCA",
+  "Settlement - Non BCA",
+  "Total Settlement",
+  "Uang Masuk - BCA",
+  "Uang Masuk - Non BCA",
+  "Uang Masuk - Cash"
+
+Lisensi
+-------
+Bebas digunakan untuk kebutuhan internal.
+"""
