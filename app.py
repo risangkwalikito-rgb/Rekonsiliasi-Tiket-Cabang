@@ -275,23 +275,23 @@ if go:
     settle_series = settle_by_date.reindex(idx, fill_value=0.0)
 
     final = pd.DataFrame(index=idx)
-    final["Tiket Detail"] = tiket_series.values
-    final["Settlement Dana"] = settle_series.values
-    final["Selisih"] = final["Tiket Detail"] - final["Settlement Dana"]
+    final["Tiket Detail ESPAY"] = tiket_series.values
+    final["Settlement Dana ESPAY"] = settle_series.values
+    final["Selisih"] = final["Tiket Detail ESPAY"] - final["Settlement Dana ESPAY"]
 
     # View + total
     view = final.reset_index()
     view.insert(0, "No", range(1, len(view) + 1))
     total_row = pd.DataFrame(
         [{"No": "", "Tanggal": "TOTAL",
-          "Tiket Detail": final["Tiket Detail"].sum(),
-          "Settlement Dana": final["Settlement Dana"].sum(),
+          "Tiket Detail ESPAY": final["Tiket Detail ESPAY"].sum(),
+          "Settlement Dana ESPAY": final["Settlement Dana ESPAY"].sum(),
           "Selisih": final["Selisih"].sum()}]
     )
     view_total = pd.concat([view, total_row], ignore_index=True)
 
     fmt = view_total.copy()
-    for c in ["Tiket Detail", "Settlement Dana", "Selisih"]:
+    for c in ["Tiket Detail ESPAY", "Settlement Dana ESPAY", "Selisih"]:
         fmt[c] = fmt[c].apply(_idr_fmt)
 
     st.subheader("Hasil Rekonsiliasi per Tanggal (mengikuti bulan parameter)")
