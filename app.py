@@ -1,21 +1,20 @@
-# ===============================
-# File: app.py
-# (save as UTF-8)
-# ===============================
+# app.py
 # -*- coding: utf-8 -*-
 """
-#Streamlit app: Rekonsiliasi Otomatis (Tiket Detail • Settlement • Rekening Koran)#
+Rekonsiliasi Sederhana: Tiket Detail vs Settlement Dana
 
-Fungsi:
-- Upload 3 file (Excel Tiket Detail, CSV Settlement, Excel Rekening Koran)
-- Mapping kolom fleksibel (tanggal, amount, channel/bank/keterangan)
-- Normalisasi angka (format Indonesia) & tanggal
-- Agregasi per tanggal: ESPAY, Cash, Settlement BCA/Non-BCA, Uang Masuk BCA/Non-BCA/Cash
-- Hitung Selisih & Total, tampilkan tabel, unduh Excel
+Spesifikasi:
+- Tiket Detail (Excel):
+  Tanggal  = kolom "Action date"
+  Nominal  = kolom "tarif"
+  Filter   = "St Bayar" == "paid" (case-insensitive) AND "Bank" == "ESPAY"
+- Settlement Dana (CSV/Excel):
+  Tanggal  = kolom "Transaction Date"
+  Nominal  = kolom "Settlement Amount"
+- Selisih  = Tiket Detail - Settlement Dana
 
-Dependensi:
-  pip install streamlit pandas numpy openpyxl python-dateutil
 Jalankan:
+  pip install streamlit pandas numpy openpyxl python-dateutil
   streamlit run app.py
 """
 
@@ -23,7 +22,7 @@ from __future__ import annotations
 
 import io
 import re
-from typing import Iterable, Optional, Tuple, List
+from typing import Optional, Iterable
 
 import numpy as np
 import pandas as pd
@@ -31,42 +30,36 @@ import streamlit as st
 from dateutil import parser as dtparser
 
 
-# ---------------- Utilities ----------------
+# ---------- Utilities ----------
 
-NON_NUM_RE = re.compile(r"[^\d\-]")
+_NON_NUM_RE = re.compile(r"[^\d\-]")
 
-def parse_rupiah_to_number(val) -> float:
-    """
-    Robust IDR parser: accepts '1.234.567', '1,234,567', '(1.000)', strings with symbols.
-    Returns float; on failure -> 0.0.
-    """
+def _parse_rupiah(val) -> float:
+    """Parser angka: terima 1.234.567, 1,234,567, (1.000), -2.500, dll. Gagal -> 0.0."""
     if pd.isna(val):
         return 0.0
     s = str(val).strip()
     if not s:
         return 0.0
     neg = False
-    if s.startswith('(') and s.endswith(')'):
+    if s.startswith("(") and s.endswith(")"):
         neg = True
         s = s[1:-1]
-    s = s.replace(',', '.')   # unify decimal mark
-    s = NON_NUM_RE.sub('', s) # keep digits & minus
-    if not s or s == '-':
+    s = s.replace(",", ".")
+    s = _NON_NUM_RE.sub("", s)
+    if not s or s == "-":
         return 0.0
     try:
         num = float(s)
     except Exception:
         return 0.0
-    return -num if (neg or s.startswith('-')) else num
+    return -num if (neg or s.startswith("-")) else num
 
+def _to_num(sr: pd.Series) -> pd.Series:
+    return sr.apply(_parse_rupiah).astype(float)
 
-def normalize_numeric_series(sr: pd.Series) -> pd.Series:
-    """Vectorized parser for rupiah-like strings -> float."""
-    return sr.apply(parse_rupiah_to_number).astype(float)
-
-
-def normalize_date(val):
-    """Convert many date formats to pandas Timestamp (date-only)."""
+def _to_date(val) -> Optional[pd.Timestamp]:
+    """Normalisasi ke tanggal (tanpa jam)."""
     if pd.isna(val):
         return None
     if isinstance(val, (pd.Timestamp, np.datetime64)):
@@ -82,313 +75,178 @@ def normalize_date(val):
             continue
     return None
 
-
-def detect_column(df: pd.DataFrame, candidates: Iterable[str]) -> Optional[str]:
-    """Find first column whose name contains any candidate substring (case-insensitive)."""
-    cols = [c for c in df.columns if isinstance(c, str)]
-    low = {c.lower(): c for c in cols}
-    for cand in candidates:
-        for k, orig in low.items():
-            if cand in k:
-                return orig
-    return None
-
-
-def idr_fmt(n: float) -> str:
-    """Format integer-like to ID style (thousands '.') and parentheses for negatives."""
+def _idr_fmt(n: float) -> str:
+    """Format IDR sederhana: pemisah ribuan '.' & negatif pakai ()."""
     if pd.isna(n):
         return "-"
     neg = n < 0
-    n_abs = abs(int(round(n)))
-    s = f"{n_abs:,}".replace(",", ".")
+    s = f"{abs(int(round(n))):,}".replace(",", ".")
     return f"({s})" if neg else s
 
-
-def sum_by_date(
-    df: pd.DataFrame,
-    date_col: str,
-    amt_col: str,
-    flt_col: Optional[str] = None,
-    include_keywords: Optional[List[str]] = None,
-    exclude_keywords: Optional[List[str]] = None,
-) -> pd.Series:
-    """
-    Sum amount per date with optional keyword filter on flt_col.
-    include > exclude precedence. Case-insensitive substring match.
-    """
-    if df.empty:
-        return pd.Series(dtype=float)
-
-    work = df.copy()
-    work[date_col] = work[date_col].apply(normalize_date)
-    work = work[~work[date_col].isna()]
-    work[amt_col] = normalize_numeric_series(work[amt_col])
-
-    if flt_col:
-        col = work[flt_col].astype(str).str.lower()
-        if include_keywords:
-            pats = [re.escape(k.lower()) for k in include_keywords if k]
-            if pats:
-                work = work[col.str.contains("|".join(pats), na=False)]
-        if exclude_keywords:
-            pats = [re.escape(k.lower()) for k in exclude_keywords if k]
-            if pats:
-                work = work[~col.str.contains("|".join(pats), na=False)]
-
-    grp = work.groupby(work[date_col])[[amt_col]].sum().squeeze()
-    grp.index = pd.to_datetime(grp.index).date
-    return grp
-
-
-def kw_list(s: str) -> List[str]:
-    return [k.strip() for k in (s or "").split(",") if k.strip()]
-
-
-# ---------------- Streamlit UI ----------------
-
-st.set_page_config(page_title="Rekonsiliasi Otomatis", layout="wide")
-st.title("📊 Rekonsiliasi Otomatis — Tiket Detail • Settlement • Rekening Koran")
-
-with st.sidebar:
-    st.header("1) Upload Sumber Data")
-    tiket_file = st.file_uploader("Tiket Detail (Excel)", type=["xls", "xlsx"])
-    settle_file = st.file_uploader("Settlement Dana Masuk (CSV)", type=["csv"])
-    koran_file = st.file_uploader("Rekening Koran (Excel)", type=["xls", "xlsx"])
-
-def try_read_excel(uploaded_file) -> pd.DataFrame:
+def _read_any(uploaded_file) -> pd.DataFrame:
+    """Baca CSV kalau nama file berakhiran .csv, selain itu coba Excel."""
     if not uploaded_file:
         return pd.DataFrame()
+    name = uploaded_file.name.lower()
     try:
-        return pd.read_excel(uploaded_file, engine="openpyxl")
+        if name.endswith(".csv"):
+            for enc in ("utf-8-sig", "utf-8", "cp1252", "iso-8859-1"):
+                try:
+                    return pd.read_csv(uploaded_file, encoding=enc)
+                except Exception:
+                    uploaded_file.seek(0)
+            st.error("CSV gagal dibaca. Coba simpan ulang sebagai UTF-8.")
+            return pd.DataFrame()
+        else:
+            return pd.read_excel(uploaded_file, engine="openpyxl")
     except Exception as e:
-        st.error(f"Gagal membaca Excel: {e}")
+        st.error(f"Gagal membaca file: {e}")
         return pd.DataFrame()
 
-def try_read_csv(uploaded_file) -> pd.DataFrame:
-    if not uploaded_file:
-        return pd.DataFrame()
-    for enc in ("utf-8-sig", "utf-8", "cp1252", "iso-8859-1"):
-        try:
-            return pd.read_csv(uploaded_file, encoding=enc)
-        except Exception:
-            continue
-    st.error("Gagal membaca CSV (coba simpan ulang sebagai UTF-8).")
-    return pd.DataFrame()
-
-tiket_df = try_read_excel(tiket_file)
-settle_df = try_read_csv(settle_file)
-koran_df = try_read_excel(koran_file)
-
-def mapping_controls(df: pd.DataFrame, title: str):
+def _find_col(df: pd.DataFrame, *candidates: Iterable[str]) -> Optional[str]:
+    """Cari kolom by-case-insensitive exact or relaxed contains."""
     if df.empty:
-        st.info(f"Unggah file {title} terlebih dahulu.")
-        return None, None, None
-    with st.expander(f"🔧 Mapping kolom: {title}", expanded=False):
-        cols = df.columns.tolist()
-        auto_date = detect_column(df, ("tanggal", "date", "tgl", "waktu", "posting", "settle"))
-        auto_amt  = detect_column(df, ("amount", "nominal", "jumlah", "nilai", "total", "debit", "kredit", "credit"))
-        auto_ch   = detect_column(df, ("channel", "metode", "method", "tipe", "type", "bank", "acquirer", "source", "desc", "keterangan"))
+        return None
+    cols = [c for c in df.columns if isinstance(c, str)]
+    norm = {c.lower().strip(): c for c in cols}
+    # exact (case-insensitive)
+    for cands in candidates:
+        for c in cands:
+            key = c.lower().strip()
+            if key in norm:
+                return norm[key]
+    # relaxed contains
+    lowers = {c: o for c, o in ((c.lower(), c) for c in cols)}
+    for cands in candidates:
+        for c in cands:
+            key = c.lower().strip()
+            for lc, orig in lowers.items():
+                if key in lc:
+                    return orig
+    return None
 
-        date_col = st.selectbox("Kolom tanggal", options=cols, index=(cols.index(auto_date) if auto_date in cols else 0), key=title+"_date")
-        amt_col  = st.selectbox("Kolom amount/nominal", options=cols, index=(cols.index(auto_amt) if auto_amt in cols else 0), key=title+"_amt")
-        ch_col   = st.selectbox("Kolom channel/bank/keterangan (opsional)", options=["<tidak ada>"] + cols, index=(0 if not auto_ch else cols.index(auto_ch)+1), key=title+"_ch")
-        ch_col   = None if ch_col == "<tidak ada>" else ch_col
-    return date_col, amt_col, ch_col
 
-t_date, t_amt, t_ch = mapping_controls(tiket_df, "Tiket Detail")
-s_date, s_amt, s_ch = mapping_controls(settle_df, "Settlement")
-k_date, k_amt, k_ch = mapping_controls(koran_df, "Rekening Koran")
+# ---------- Streamlit UI ----------
+
+st.set_page_config(page_title="Rekonsiliasi Tiket vs Settlement", layout="wide")
+st.title("Rekonsiliasi: Tiket Detail vs Settlement Dana")
 
 with st.sidebar:
-    st.header("2) Kata Kunci Kategori")
-    st.caption("Pisahkan dengan koma; cocok sebagian; case-insensitive.")
-    kw_espay = st.text_input("ESPAY (Tiket/Settlement)", value="espay, va espay")
-    kw_cash  = st.text_input("CASH (Tiket/Koran)", value="cash, tunai, setor tunai")
-    kw_bca   = st.text_input("BCA (Settlement/Koran)", value="bca")
-    kw_nonbca= st.text_input("Non-BCA (Settlement/Koran)", value="non bca, bri, bni, mandiri, cimb, permata, danamon")
+    st.header("1) Upload Sumber")
+    tiket_file = st.file_uploader("Tiket Detail (Excel .xls/.xlsx)", type=["xls", "xlsx"])
+    settle_file = st.file_uploader("Settlement Dana (CSV/Excel)", type=["csv", "xls", "xlsx"])
 
-    show_preview = st.checkbox("Tampilkan pratinjau sumber data", value=False)
-    go = st.button("🚀 Proses Rekonsiliasi", type="primary", use_container_width=True)
+    st.header("2) Opsi")
+    show_preview = st.checkbox("Tampilkan pratinjau data", value=False)
+    go = st.button("Proses", type="primary", use_container_width=True)
+
+# Baca data
+tiket_df = _read_any(tiket_file)
+settle_df = _read_any(settle_file)
 
 if show_preview:
-    st.subheader("Pratinjau Sumber Data")
+    st.subheader("Pratinjau")
     if not tiket_df.empty:
-        st.markdown("**Tiket Detail**")
+        st.markdown("Tiket Detail")
         st.dataframe(tiket_df.head(50), use_container_width=True)
     if not settle_df.empty:
-        st.markdown("**Settlement**")
+        st.markdown("Settlement Dana")
         st.dataframe(settle_df.head(50), use_container_width=True)
-    if not koran_df.empty:
-        st.markdown("**Rekening Koran**")
-        st.dataframe(koran_df.head(50), use_container_width=True)
 
+# ---------- Processing ----------
 if go:
-    missing = []
-    if tiket_df.empty or not (t_date and t_amt): missing.append("Tiket Detail")
-    if settle_df.empty or not (s_date and s_amt): missing.append("Settlement")
-    if koran_df.empty or not (k_date and k_amt): missing.append("Rekening Koran")
-    if missing:
-        st.error("Lengkapi unggahan & mapping: " + ", ".join(missing))
+    # Tiket Detail mapping fix
+    t_date_col = _find_col(tiket_df, ["Action date"])
+    t_nom_col  = _find_col(tiket_df, ["tarif"])
+    t_stat_col = _find_col(tiket_df, ["St Bayar", "Status Bayar", "status"])
+    t_bank_col = _find_col(tiket_df, ["Bank", "Payment Channel", "channel"])
+
+    missing_tiket = [name for name, col in [
+        ("Action date", t_date_col),
+        ("tarif", t_nom_col),
+        ("St Bayar", t_stat_col),
+        ("Bank", t_bank_col),
+    ] if col is None]
+
+    # Settlement mapping fix
+    s_date_col = _find_col(settle_df, ["Transaction Date"])
+    s_nom_col  = _find_col(settle_df, ["Settlement Amount"])
+
+    missing_settle = [name for name, col in [
+        ("Transaction Date", s_date_col),
+        ("Settlement Amount", s_nom_col),
+    ] if col is None]
+
+    if tiket_df.empty:
+        st.error("File Tiket Detail belum diupload.")
+        st.stop()
+    if settle_df.empty:
+        st.error("File Settlement Dana belum diupload.")
+        st.stop()
+    if missing_tiket:
+        st.error("Kolom Tiket Detail tidak ditemukan: " + ", ".join(missing_tiket))
+        st.stop()
+    if missing_settle:
+        st.error("Kolom Settlement Dana tidak ditemukan: " + ", ".join(missing_settle))
         st.stop()
 
-    # Build keyword lists
-    espay_keys = kw_list(kw_espay)
-    cash_keys  = kw_list(kw_cash)
-    bca_keys   = kw_list(kw_bca)
-    nonbca_keys= kw_list(kw_nonbca)
+    # Tiket Detail: filter paid & ESPAY
+    td = tiket_df.copy()
+    td[t_date_col] = td[t_date_col].apply(_to_date)
+    td = td[~td[t_date_col].isna()]
 
-    # --- Aggregations ---
-    tiket_espay = sum_by_date(tiket_df, t_date, t_amt, t_ch, include_keywords=espay_keys)
-    tiket_cash  = sum_by_date(tiket_df, t_date, t_amt, t_ch, include_keywords=cash_keys)
+    # status bayar == paid
+    td_stat = td[t_stat_col].astype(str).str.strip().str.lower()
+    td = td[td_stat.eq("paid")]
 
-    settle_espay = sum_by_date(settle_df, s_date, s_amt, s_ch, include_keywords=espay_keys)
-    settle_bca   = sum_by_date(settle_df, s_date, s_amt, s_ch, include_keywords=bca_keys)
-    if nonbca_keys:
-        settle_nonbca = sum_by_date(settle_df, s_date, s_amt, s_ch, include_keywords=nonbca_keys)
-    else:
-        settle_nonbca = sum_by_date(settle_df, s_date, s_amt, s_ch, exclude_keywords=bca_keys)
+    # bank == ESPAY
+    td_bank = td[t_bank_col].astype(str).str.strip().str.lower()
+    td = td[td_bank.eq("espay")]
 
-    koran_norm = koran_df.copy()
-    koran_norm[k_date] = koran_norm[k_date].apply(normalize_date)
-    koran_norm[k_amt] = normalize_numeric_series(koran_norm[k_amt])
+    # nominal
+    td[t_nom_col] = _to_num(td[t_nom_col])
 
-    in_bca    = sum_by_date(koran_norm, k_date, k_amt, k_ch, include_keywords=bca_keys)
-    in_nonbca = sum_by_date(koran_norm, k_date, k_amt, k_ch, include_keywords=nonbca_keys)
-    in_cash   = sum_by_date(koran_norm, k_date, k_amt, k_ch, include_keywords=cash_keys)
+    tiket_per_date = td.groupby(td[t_date_col])[[t_nom_col]].sum().squeeze()
+    tiket_per_date.index = pd.to_datetime(tiket_per_date.index).date
+    tiket_per_date.name = "Tiket Detail"
 
-    # --- Combine final table ---
-    all_dates = sorted(
-        set(tiket_espay.index)
-        | set(tiket_cash.index)
-        | set(settle_espay.index)
-        | set(settle_bca.index)
-        | set(settle_nonbca.index)
-        | set(in_bca.index)
-        | set(in_nonbca.index)
-        | set(in_cash.index)
-    )
+    # Settlement Dana
+    sd = settle_df.copy()
+    sd[s_date_col] = sd[s_date_col].apply(_to_date)
+    sd = sd[~sd[s_date_col].isna()]
+    sd[s_nom_col] = _to_num(sd[s_nom_col])
+
+    settle_per_date = sd.groupby(sd[s_date_col])[[s_nom_col]].sum().squeeze()
+    settle_per_date.index = pd.to_datetime(settle_per_date.index).date
+    settle_per_date.name = "Settlement Dana"
+
+    # Gabung & hitung selisih
+    all_dates = sorted(set(tiket_per_date.index) | set(settle_per_date.index))
     final = pd.DataFrame(index=pd.Index(all_dates, name="Tanggal"))
-    final["Tiket Detail - Espay"] = tiket_espay.reindex(all_dates).fillna(0.0)
-    final["Settlement - ESPAY"] = settle_espay.reindex(all_dates).fillna(0.0)
-    final["SELISIH TIKET DETAIL - SETTLEMENT"] = final["Tiket Detail - Espay"] - final["Settlement - ESPAY"]
-    final["Tiket Detail Cash"] = tiket_cash.reindex(all_dates).fillna(0.0)
-    final["Settlement - BCA"] = settle_bca.reindex(all_dates).fillna(0.0)
-    final["Settlement - Non BCA"] = settle_nonbca.reindex(all_dates).fillna(0.0)
-    final["Total Settlement"] = final["Settlement - BCA"] + final["Settlement - Non BCA"]
-    final["Uang Masuk - BCA"] = in_bca.reindex(all_dates).fillna(0.0)
-    final["Uang Masuk - Non BCA"] = in_nonbca.reindex(all_dates).fillna(0.0)
-    final["Uang Masuk - Cash"] = in_cash.reindex(all_dates).fillna(0.0)
+    final["Tiket Detail"] = tiket_per_date.reindex(all_dates).fillna(0.0)
+    final["Settlement Dana"] = settle_per_date.reindex(all_dates).fillna(0.0)
+    final["Selisih"] = final["Tiket Detail"] - final["Settlement Dana"]
 
-    # Render formatted table
+    # Render
     final_reset = final.reset_index()
     final_reset.insert(0, "No", range(1, len(final_reset) + 1))
 
     fmt = final_reset.copy()
-    money_cols = [c for c in fmt.columns if c not in ("No", "Tanggal")]
-    for c in money_cols:
-        fmt[c] = fmt[c].apply(idr_fmt)
+    for c in ["Tiket Detail", "Settlement Dana", "Selisih"]:
+        fmt[c] = fmt[c].apply(_idr_fmt)
 
     st.subheader("Hasil Rekonsiliasi per Tanggal")
     st.dataframe(fmt, use_container_width=True, hide_index=True)
 
-    # Download: Excel with raw + view sheet
-    out = io.BytesIO()
-    with pd.ExcelWriter(out, engine="openpyxl") as xw:
+    # Unduh Excel
+    bio = io.BytesIO()
+    with pd.ExcelWriter(bio, engine="openpyxl") as xw:
         final_reset.to_excel(xw, index=False, sheet_name="Rekonsiliasi")
         fmt.to_excel(xw, index=False, sheet_name="Rekonsiliasi_View")
     st.download_button(
-        "⬇️ Unduh Excel",
-        data=out.getvalue(),
-        file_name="rekonsiliasi.xlsx",
+        "Unduh Excel",
+        data=bio.getvalue(),
+        file_name="rekonsiliasi_tiket_vs_settlement.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         use_container_width=True,
     )
-
-    st.caption("Tips: sesuaikan Kata Kunci & Mapping jika label bank/channel berbeda.")
-
-
-# ===============================
-# File: readme.txt
-# ===============================
-# Simpan konten ini sebagai readme.txt (UTF-8)
-
-"""
-Rekonsiliasi Otomatis — Tiket Detail • Settlement • Rekening Koran
-==================================================================
-
-Deskripsi
----------
-Aplikasi Streamlit untuk rekonsiliasi otomatis antara:
-1) Excel Tiket Detail,
-2) CSV Settlement dana masuk, dan
-3) Excel Rekening Koran.
-
-Fitur
------
-- Upload 3 sumber data di sidebar.
-- Mapping kolom fleksibel (tanggal, amount, channel/bank/keterangan).
-- Normalisasi angka (format Indonesia) & tanggal otomatis.
-- Agregasi per tanggal:
-  * Tiket Detail: ESPAY, Cash
-  * Settlement: ESPAY, BCA, Non-BCA
-  * Uang Masuk (Rekening Koran): BCA, Non-BCA, Cash
-- Hitung selisih & total settlement.
-- Tabel hasil + unduh Excel (dua sheet: angka & tampilan berformat).
-
-Persyaratan
------------
-- Python 3.9+ disarankan.
-
-Instalasi
----------
-1) (Opsional) Buat virtualenv
-2) Install dependensi:
-   pip install streamlit pandas numpy openpyxl python-dateutil
-
-Menjalankan Aplikasi
---------------------
-streamlit run app.py
-
-Penggunaan
-----------
-1) Upload file:
-   - Tiket Detail (Excel .xls/.xlsx)
-   - Settlement (CSV)
-   - Rekening Koran (Excel .xls/.xlsx)
-2) Mapping kolom per file:
-   - Tanggal: kolom tanggal transaksi.
-   - Amount/Nominal: kolom nilai uang.
-   - Channel/Bank/Keterangan (opsional): kolom teks untuk filter kata kunci.
-3) Atur kata kunci (pisahkan dengan koma, case-insensitive):
-   - ESPAY: contoh "espay, va espay"
-   - CASH: "cash, tunai, setor tunai"
-   - BCA: "bca"
-   - Non-BCA: "non bca, bri, bni, mandiri, cimb, permata, danamon"
-4) Klik "Proses Rekonsiliasi".
-5) Tabel hasil akan muncul; klik "Unduh Excel".
-
-Catatan & Tips
---------------
-- Jika kolom tidak terdeteksi otomatis, pilih manual di expander "Mapping kolom".
-- Nilai negatif boleh dalam format (1.000) atau -1000.
-- Jika Non-BCA tidak spesifik di data, kosongkan kata kunci Non-BCA untuk memakai fallback "selain BCA".
-- Jika CSV gagal dibaca, simpan ulang sebagai UTF-8.
-
-Struktur Kolom Output
----------------------
-- No, Tanggal,
-  "Tiket Detail - Espay",
-  "Settlement - ESPAY",
-  "SELISIH TIKET DETAIL - SETTLEMENT",
-  "Tiket Detail Cash",
-  "Settlement - BCA",
-  "Settlement - Non BCA",
-  "Total Settlement",
-  "Uang Masuk - BCA",
-  "Uang Masuk - Non BCA",
-  "Uang Masuk - Cash"
-
-Lisensi
--------
-Bebas digunakan untuk kebutuhan internal.
-"""
