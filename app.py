@@ -6,7 +6,7 @@ Rekonsiliasi: Tiket Detail vs Settlement Dana
 - Multi-file upload (Tiket Excel; Settlement CSV/Excel)
 - Parser uang/tanggal robust (format Eropa & serial Excel)
 - Tiket difilter: St Bayar='paid' & Bank='ESPAY'
-- Tambahan kolom: Settlement Dana BCA & Settlement Dana Non BCA (berdasarkan Product Name)
+- Tambahan kolom: Settlement Dana BCA & Non BCA (berdasarkan Product Name)
 """
 
 from __future__ import annotations
@@ -20,7 +20,6 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 from dateutil import parser as dtparser
-
 
 # ---------- Utilities ----------
 
@@ -55,23 +54,17 @@ def _parse_money(val) -> float:
         num = float(num_s) if num_s else 0.0
     return -num if neg else num
 
-
 def _to_num(sr: pd.Series) -> pd.Series:
     return sr.apply(_parse_money).astype(float)
-
 
 def _to_date(val) -> Optional[pd.Timestamp]:
     if pd.isna(val):
         return None
     if isinstance(val, (int, float, np.number)):
-        if not np.isfinite(val):
-            return None
-        if 1 <= float(val) <= 100000:
-            try:
-                base = pd.Timestamp("1899-12-30")
-                return (base + pd.to_timedelta(float(val), unit="D")).normalize()
-            except Exception:
-                pass
+        if np.isfinite(val) and 1 <= float(val) <= 100000:
+            base = pd.Timestamp("1899-12-30")
+            return (base + pd.to_timedelta(float(val), unit="D")).normalize()
+        return None
     if isinstance(val, (pd.Timestamp, np.datetime64)):
         return pd.to_datetime(val).normalize()
     s = str(val).strip()
@@ -85,7 +78,6 @@ def _to_date(val) -> Optional[pd.Timestamp]:
             continue
     return None
 
-
 def _read_any(uploaded_file) -> pd.DataFrame:
     if not uploaded_file:
         return pd.DataFrame()
@@ -96,12 +88,9 @@ def _read_any(uploaded_file) -> pd.DataFrame:
                 try:
                     uploaded_file.seek(0)
                     return pd.read_csv(
-                        uploaded_file,
-                        encoding=enc,
-                        sep=None,
-                        engine="python",
-                        dtype=str,
-                        na_filter=False,
+                        uploaded_file, encoding=enc,
+                        sep=None, engine="python",
+                        dtype=str, na_filter=False
                     )
                 except Exception:
                     continue
@@ -112,7 +101,6 @@ def _read_any(uploaded_file) -> pd.DataFrame:
     except Exception as e:
         st.error(f"Gagal membaca {uploaded_file.name}: {e}")
         return pd.DataFrame()
-
 
 def _find_col(df: pd.DataFrame, names: List[str]) -> Optional[str]:
     if df.empty:
@@ -129,14 +117,12 @@ def _find_col(df: pd.DataFrame, names: List[str]) -> Optional[str]:
                 return c
     return None
 
-
 def _idr_fmt(n: float) -> str:
     if pd.isna(n):
         return "-"
     neg = n < 0
     s = f"{abs(int(round(n))):,}".replace(",", ".")
     return f"({s})" if neg else s
-
 
 def _concat_files(files) -> pd.DataFrame:
     if not files:
@@ -145,10 +131,9 @@ def _concat_files(files) -> pd.DataFrame:
     for f in files:
         df = _read_any(f)
         if not df.empty:
-            df["__source__"] = f.name  # debug
+            df["__source__"] = f.name
             frames.append(df)
     return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
-
 
 def _month_selector() -> Tuple[int, int]:
     from datetime import date
@@ -159,14 +144,34 @@ def _month_selector() -> Tuple[int, int]:
         ("05", "Mei"), ("06", "Juni"), ("07", "Juli"), ("08", "Agustus"),
         ("09", "September"), ("10", "Oktober"), ("11", "November"), ("12", "Desember"),
     ]
-    col1, col2 = st.columns(2)
-    with col1:
+    c1, c2 = st.columns(2)
+    with c1:
         year = st.selectbox("Tahun", years, index=years.index(today.year))
-    with col2:
-        month_label = st.selectbox("Bulan", months, index=int(today.strftime("%m")) - 1, format_func=lambda x: x[1])
-        month = int(month_label[0])
+    with c2:
+        sel = st.selectbox("Bulan", months, index=int(today.strftime("%m")) - 1, format_func=lambda x: x[1])
+        month = int(sel[0])
     return year, month
 
+# --- Product Name matching (robust) ---
+_BCA_PATTERNS = (
+    "bcavaonline",
+    "bcavirtualaccountonline",
+)
+
+def _is_bca_va_online(text: str) -> bool:
+    """True jika text mengandung 'BCA VA Online' (robust terhadap spasi/variasi)."""
+    if text is None or (isinstance(text, float) and np.isnan(text)):
+        return False
+    s = str(text).lower()
+    compact = re.sub(r"[^a-z0-9]+", "", s)
+    if any(pat in compact for pat in _BCA_PATTERNS):
+        return True
+    # token-based: harus ada bca + (va|virtual account) + online
+    tokens = set(re.findall(r"[a-z0-9]+", s))
+    has_bca = "bca" in tokens
+    has_va = "va" in tokens or ("virtual" in tokens and "account" in tokens)
+    has_online = "online" in tokens
+    return bool(has_bca and has_va and has_online)
 
 # ---------- App ----------
 
@@ -176,14 +181,10 @@ st.title("Rekonsiliasi: Tiket Detail vs Settlement Dana")
 with st.sidebar:
     st.header("1) Upload Sumber (multi-file)")
     tiket_files = st.file_uploader(
-        "Tiket Detail (Excel .xls/.xlsx)",
-        type=["xls", "xlsx"],
-        accept_multiple_files=True,
+        "Tiket Detail (Excel .xls/.xlsx)", type=["xls", "xlsx"], accept_multiple_files=True
     )
     settle_files = st.file_uploader(
-        "Settlement Dana (CSV/Excel)",
-        type=["csv", "xls", "xlsx"],
-        accept_multiple_files=True,
+        "Settlement Dana (CSV/Excel)", type=["csv", "xls", "xlsx"], accept_multiple_files=True
     )
 
     st.header("2) Parameter Bulan & Tahun (WAJIB)")
@@ -203,9 +204,11 @@ settle_df = _concat_files(settle_files)
 if show_preview:
     st.subheader("Pratinjau")
     if not tiket_df.empty:
-        st.markdown(f"Tiket Detail (rows: {len(tiket_df)})"); st.dataframe(tiket_df.head(50), use_container_width=True)
+        st.markdown(f"Tiket Detail (rows: {len(tiket_df)})")
+        st.dataframe(tiket_df.head(50), use_container_width=True)
     if not settle_df.empty:
-        st.markdown(f"Settlement Dana (rows: {len(settle_df)})"); st.dataframe(settle_df.head(50), use_container_width=True)
+        st.markdown(f"Settlement Dana (rows: {len(settle_df)})")
+        st.dataframe(settle_df.head(50), use_container_width=True)
 
 if go:
     # Mapping
@@ -227,15 +230,12 @@ if go:
         ("Transaction Date", s_date, "Settlement Dana"),
         ("Settlement Amount", s_amt, "Settlement Dana"),
     ]:
-        if col is None:
-            missing.append(f"{src}: {name}")
-    # Product Name opsional: kalau tidak ada, kolom BCA/Non-BCA akan 0
-    if s_prod is None:
-        st.warning("Kolom 'Product Name' tidak ditemukan. Kolom Settlement BCA/Non BCA akan diisi 0.")
-
+        if col is None: missing.append(f"{src}: {name}")
     if missing:
         st.error("Kolom wajib tidak ditemukan → " + "; ".join(missing))
         st.stop()
+    if s_prod is None:
+        st.warning("Kolom 'Product Name' tidak ditemukan. Kolom BCA/Non-BCA akan 0.")
 
     # --- Tiket Detail ---
     td = tiket_df.copy()
@@ -249,50 +249,51 @@ if go:
     tiket_by_date = td.groupby(td[t_date])[t_amt].sum()
     tiket_by_date.index = pd.to_datetime(tiket_by_date.index).date
 
-    # --- Settlement Dana (Total ESPAY) ---
+    # --- Settlement Dana (Total) ---
     sd = settle_df.copy()
     sd[s_date] = sd[s_date].apply(_to_date)
     sd = sd[~sd[s_date].isna()]
     sd = sd[(sd[s_date] >= month_start) & (sd[s_date] <= month_end)]
     if show_debug:
-        st.info(f"Contoh Settlement Amount (raw → parsed): {sd[s_amt].head(3).tolist()} → {_to_num(sd[s_amt].head(3)).tolist()}")
+        st.info(
+            f"Contoh Settlement Amount (raw → parsed): {sd[s_amt].head(3).tolist()} → {_to_num(sd[s_amt].head(3)).tolist()}"
+        )
     sd[s_amt] = _to_num(sd[s_amt])
-    settle_by_date = sd.groupby(sd[s_date])[s_amt].sum()
-    settle_by_date.index = pd.to_datetime(settle_by_date.index).date
 
-    # --- Split BCA vs Non-BCA (berdasarkan Product Name) ---
+    settle_total = sd.groupby(sd[s_date])[s_amt].sum()
+    settle_total.index = pd.to_datetime(settle_total.index).date
+
+    # --- Split BCA vs Non-BCA ---
     if s_prod is not None:
-        prod_norm = sd[s_prod].astype(str).str.strip().str.lower()
-        bca_mask = prod_norm.eq("bca va online")
+        bca_mask = sd[s_prod].apply(_is_bca_va_online)
         settle_bca = sd[bca_mask].groupby(sd[bca_mask][s_date])[s_amt].sum() if bca_mask.any() else pd.Series(dtype=float)
-        settle_nonbca = sd[~bca_mask].groupby(sd[~bca_mask][s_date])[s_amt].sum() if (~bca_mask).any() else pd.Series(dtype=float)
     else:
-        settle_bca = pd.Series(dtype=float); settle_nonbca = pd.Series(dtype=float)
+        settle_bca = pd.Series(dtype=float)
 
-    # --- Index tanggal dari parameter (1..akhir bulan) ---
+    # Index tanggal 1..akhir bulan
     idx = pd.Index(pd.date_range(month_start, month_end, freq="D").date, name="Tanggal")
 
     def _reidx(s: pd.Series) -> pd.Series:
         if not isinstance(s, pd.Series):
             s = pd.Series(dtype=float)
-        if len(s.index):
+        if len(getattr(s, "index", [])):
             s.index = pd.to_datetime(s.index).date
         return s.reindex(idx, fill_value=0.0)
 
-    tiket_series   = _reidx(tiket_by_date)
-    settle_series  = _reidx(settle_by_date)
-    bca_series     = _reidx(settle_bca)
-    nonbca_series  = _reidx(settle_nonbca)
+    tiket_series  = _reidx(tiket_by_date)
+    total_series  = _reidx(settle_total)
+    bca_series    = _reidx(settle_bca)
+    nonbca_series = (total_series - bca_series)  # biar konsisten: total = bca + non-bca
 
-    # --- Tabel utama (TIDAK mengubah kolom lama; hanya menambah 2 kolom baru) ---
+    # --- Tabel utama ---
     final = pd.DataFrame(index=idx)
-    final["Tiket Detail ESPAY"]     = tiket_series.values
-    final["Settlement Dana ESPAY"]  = settle_series.values
-    final["Settlement Dana BCA"]    = bca_series.values
-    final["Settlement Dana Non BCA"]= nonbca_series.values
-    final["Selisih"]                = final["Tiket Detail ESPAY"] - final["Settlement Dana ESPAY"]
+    final["Tiket Detail ESPAY"]      = tiket_series.values
+    final["Settlement Dana ESPAY"]   = total_series.values
+    final["Settlement Dana BCA"]     = bca_series.values
+    final["Settlement Dana Non BCA"] = nonbca_series.values
+    final["Selisih"] = final["Tiket Detail ESPAY"] - final["Settlement Dana ESPAY"]
 
-    # View + total
+    # View + TOTAL
     view = final.reset_index()
     view.insert(0, "No", range(1, len(view) + 1))
     total_row = pd.DataFrame([{
@@ -307,18 +308,18 @@ if go:
     view_total = pd.concat([view, total_row], ignore_index=True)
 
     fmt = view_total.copy()
-    money_cols = [
-        "Tiket Detail ESPAY",
-        "Settlement Dana ESPAY",
-        "Settlement Dana BCA",
-        "Settlement Dana Non BCA",
-        "Selisih",
-    ]
-    for c in money_cols:
+    for c in ["Tiket Detail ESPAY", "Settlement Dana ESPAY", "Settlement Dana BCA", "Settlement Dana Non BCA", "Selisih"]:
         fmt[c] = fmt[c].apply(_idr_fmt)
 
     st.subheader("Hasil Rekonsiliasi per Tanggal (mengikuti bulan parameter)")
     st.dataframe(fmt, use_container_width=True, hide_index=True)
+
+    if show_debug and s_prod is not None:
+        st.write("Top 15 `Product Name` (bulan dipilih):")
+        st.dataframe(
+            sd[s_prod].str.strip().value_counts().head(15).rename_axis("Product Name").reset_index(name="rows"),
+            use_container_width=True,
+        )
 
     # Export
     bio = io.BytesIO()
