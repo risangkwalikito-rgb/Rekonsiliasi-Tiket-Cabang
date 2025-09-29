@@ -1,7 +1,7 @@
 # app.py
 # -*- coding: utf-8 -*-
 """
-Rekonsiliasi: Tiket Detail vs Settlement Dana (multi-file + parameter tanggal)
+Rekonsiliasi: Tiket Detail vs Settlement Dana (multi-file + filter tanggal + perbaikan groupby)
 """
 
 from __future__ import annotations
@@ -15,14 +15,11 @@ import pandas as pd
 import streamlit as st
 from dateutil import parser as dtparser
 
+
 # ---------------- Utilities ----------------
 
 def _parse_money(val) -> float:
-    """
-    Robust money parser:
-    - Handles: 1.234.567 | 1,234,567.89 | 50.300,00 | (1.000) | 1.000- | IDR 1,000 CR | -2.500
-    - If both '.' and ',' exist -> use the LAST separator as decimal.
-    """
+    """Robust parser: 1.234.567 | 1,234.567 | 50.300,00 | (1.000) | 1.000- | IDR 1,000 CR | -2.500."""
     if val is None or (isinstance(val, float) and np.isnan(val)):
         return 0.0
     if isinstance(val, (int, float, np.number)):
@@ -57,7 +54,6 @@ def _parse_money(val) -> float:
     try:
         num = float(num_s)
     except Exception:
-        # fallback: strip all separators
         num_s = s.replace(".", "").replace(",", "")
         num = float(num_s) if num_s else 0.0
 
@@ -69,7 +65,7 @@ def _to_num(sr: pd.Series) -> pd.Series:
 
 
 def _to_date(val) -> Optional[pd.Timestamp]:
-    """Parse date string/datetime + Excel serial (days since 1899-12-30)."""
+    """Parse string/datetime + Excel serial (days since 1899-12-30)."""
     if pd.isna(val):
         return None
     if isinstance(val, (int, float, np.number)):
@@ -96,7 +92,7 @@ def _to_date(val) -> Optional[pd.Timestamp]:
 
 
 def _read_any(uploaded_file) -> pd.DataFrame:
-    """CSV: autodetect delimiter, read as text; Excel: openpyxl."""
+    """CSV: autodetect delimiter & read as text; Excel via openpyxl."""
     if not uploaded_file:
         return pd.DataFrame()
     name = uploaded_file.name.lower()
@@ -148,20 +144,32 @@ def _idr_fmt(n: float) -> str:
     return f"({s})" if neg else s
 
 
+def _concat_files(files) -> pd.DataFrame:
+    if not files:
+        return pd.DataFrame()
+    frames = []
+    for f in files:
+        df = _read_any(f)
+        if not df.empty:
+            df["__source__"] = f.name
+            frames.append(df)
+    return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
+
+
 # ---------------- App ----------------
 
 st.set_page_config(page_title="Rekonsiliasi Tiket vs Settlement", layout="wide")
 st.title("Rekonsiliasi: Tiket Detail vs Settlement Dana")
 
 with st.sidebar:
-    st.header("1) Upload Sumber (boleh beberapa file)")
+    st.header("1) Upload Sumber (multi-file)")
     tiket_files = st.file_uploader(
-        "Tiket Detail (Excel .xls/.xlsx) — bisa multi-file",
+        "Tiket Detail (Excel .xls/.xlsx)",
         type=["xls", "xlsx"],
         accept_multiple_files=True,
     )
     settle_files = st.file_uploader(
-        "Settlement Dana (CSV/Excel) — bisa multi-file",
+        "Settlement Dana (CSV/Excel)",
         type=["csv", "xls", "xlsx"],
         accept_multiple_files=True,
     )
@@ -172,30 +180,14 @@ with st.sidebar:
         from datetime import date, timedelta
         default_end = date.today()
         default_start = default_end - timedelta(days=30)
-        date_range = st.date_input("Periode", value=(default_start, default_end))
-        if isinstance(date_range, tuple) and len(date_range) == 2:
-            start_date, end_date = date_range
-        else:
-            start_date = end_date = None
+        start_date, end_date = st.date_input("Periode", value=(default_start, default_end))
     else:
         start_date = end_date = None
 
     st.header("3) Opsi")
-    show_preview = st.checkbox("Tampilkan pratinjau data", value=False)
+    show_preview = st.checkbox("Tampilkan pratinjau", value=False)
     show_debug = st.checkbox("Debug parsing", value=False)
     go = st.button("Proses", type="primary", use_container_width=True)
-
-# Baca & gabung semua file per sumber
-def _concat_files(files) -> pd.DataFrame:
-    if not files:
-        return pd.DataFrame()
-    frames = []
-    for f in files:
-        df = _read_any(f)
-        if not df.empty:
-            df["__source__"] = f.name  # for debug
-            frames.append(df)
-    return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
 
 tiket_df = _concat_files(tiket_files)
 settle_df = _concat_files(settle_files)
@@ -203,14 +195,12 @@ settle_df = _concat_files(settle_files)
 if show_preview:
     st.subheader("Pratinjau")
     if not tiket_df.empty:
-        st.markdown(f"Tiket Detail (total rows: {len(tiket_df)})")
-        st.dataframe(tiket_df.head(50), use_container_width=True)
+        st.markdown(f"Tiket Detail (rows: {len(tiket_df)})"); st.dataframe(tiket_df.head(50), use_container_width=True)
     if not settle_df.empty:
-        st.markdown(f"Settlement Dana (total rows: {len(settle_df)})")
-        st.dataframe(settle_df.head(50), use_container_width=True)
+        st.markdown(f"Settlement Dana (rows: {len(settle_df)})"); st.dataframe(settle_df.head(50), use_container_width=True)
 
 if go:
-    # --- Mapping tetap (fixed) sesuai spesifikasi ---
+    # Mapping tetap sesuai spesifikasi
     t_date = _find_col(tiket_df, ["Action date"])
     t_amt  = _find_col(tiket_df, ["tarif"])
     t_stat = _find_col(tiket_df, ["St Bayar", "Status Bayar", "status"])
@@ -238,46 +228,32 @@ if go:
     td = tiket_df.copy()
     td[t_date] = td[t_date].apply(_to_date)
     td = td[~td[t_date].isna()]
-
-    # Filter status & bank
     td_stat = td[t_stat].astype(str).str.strip().str.lower()
     td_bank = td[t_bank].astype(str).str.strip().str.lower()
     td = td[td_stat.eq("paid") & td_bank.eq("espay")]
-
-    # Filter periode tanggal (opsional)
     if start_date and end_date:
         td = td[(td[t_date] >= pd.Timestamp(start_date)) & (td[t_date] <= pd.Timestamp(end_date))]
-
     td[t_amt] = _to_num(td[t_amt])
-    tiket_by_date = td.groupby(td[t_date])[[t_amt]].sum().squeeze()
-    tiket_by_date.index = pd.to_datetime(tiket_by_date.index).date
-    tiket_by_date.name = "Tiket Detail"
+
+    # >>> FIX: selalu ambil Series; jangan pakai .squeeze()
+    tiket_by_date = td.groupby(td[t_date])[t_amt].sum()
+    # aman set index ke date object
+    tiket_by_date.index = pd.Index(pd.to_datetime(tiket_by_date.index).date, name="Tanggal")
 
     # --- Settlement Dana ---
     sd = settle_df.copy()
     sd[s_date] = sd[s_date].apply(_to_date)
     sd = sd[~sd[s_date].isna()]
-
     if start_date and end_date:
         sd = sd[(sd[s_date] >= pd.Timestamp(start_date)) & (sd[s_date] <= pd.Timestamp(end_date))]
-
-    raw_amt_examples = sd[s_amt].head(5).tolist() if show_debug else []
-    sd[s_amt] = _to_num(sd[s_amt])
-    parsed_amt_examples = sd[s_amt].head(5).tolist() if show_debug else []
-
-    settle_by_date = sd.groupby(sd[s_date])[[s_amt]].sum().squeeze()
-    settle_by_date.index = pd.to_datetime(settle_by_date.index).date
-    settle_by_date.name = "Settlement Dana"
-
     if show_debug:
-        st.info(
-            "DEBUG\n"
-            f"- Tiket rows valid: {len(td)} dari {len(tiket_df)}\n"
-            f"- Settlement rows valid: {len(sd)} dari {len(settle_df)}\n"
-            + (f"- Contoh Settlement Amount (raw → parsed): {raw_amt_examples[:3]} → {parsed_amt_examples[:3]}" if raw_amt_examples else "")
-        )
+        st.info(f"Contoh Settlement Amount (raw → parsed): {sd[s_amt].head(3).tolist()} → {_to_num(sd[s_amt].head(3)).tolist()}")
+    sd[s_amt] = _to_num(sd[s_amt])
 
-    # --- Merge + diff ---
+    settle_by_date = sd.groupby(sd[s_date])[s_amt].sum()
+    settle_by_date.index = pd.Index(pd.to_datetime(settle_by_date.index).date, name="Tanggal")
+
+    # --- Merge + Diff ---
     all_dates = sorted(set(tiket_by_date.index) | set(settle_by_date.index))
     final = pd.DataFrame(index=pd.Index(all_dates, name="Tanggal"))
     final["Tiket Detail"] = tiket_by_date.reindex(all_dates).fillna(0.0)
@@ -288,7 +264,10 @@ if go:
     view = final.reset_index()
     view.insert(0, "No", range(1, len(view) + 1))
     total_row = pd.DataFrame(
-        [{"No": "", "Tanggal": "TOTAL", **{c: final[c].sum() for c in ["Tiket Detail", "Settlement Dana", "Selisih"]}}]
+        [{"No": "", "Tanggal": "TOTAL",
+          "Tiket Detail": final["Tiket Detail"].sum(),
+          "Settlement Dana": final["Settlement Dana"].sum(),
+          "Selisih": final["Selisih"].sum()}]
     )
     view_total = pd.concat([view, total_row], ignore_index=True)
 
@@ -299,7 +278,7 @@ if go:
     st.subheader("Hasil Rekonsiliasi per Tanggal")
     st.dataframe(fmt, use_container_width=True, hide_index=True)
 
-    # Export Excel
+    # Export
     bio = io.BytesIO()
     with pd.ExcelWriter(bio, engine="openpyxl") as xw:
         view_total.to_excel(xw, index=False, sheet_name="Rekonsiliasi")
