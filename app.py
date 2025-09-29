@@ -2,16 +2,17 @@
 # -*- coding: utf-8 -*-
 """
 Rekonsiliasi: Tiket Detail vs Settlement Dana
-- Multi-file upload untuk kedua sumber
+- Parameter tanggal = Bulan & Tahun; hasil selalu 1..akhir bulan itu
+- Multi-file upload (Tiket Excel; Settlement CSV/Excel)
 - Parser uang/tanggal robust (format Eropa & serial Excel)
-- Filter Tiket: St Bayar='paid' & Bank='ESPAY'
-- Kolom Tanggal pada hasil SELALU mengikuti rentang tanggal parameter
+- Tiket difilter: St Bayar='paid' & Bank='ESPAY'
 """
 
 from __future__ import annotations
 
 import io
 import re
+import calendar
 from typing import Optional, List, Tuple
 
 import numpy as np
@@ -20,7 +21,7 @@ import streamlit as st
 from dateutil import parser as dtparser
 
 
-# ---------------- Utilities ----------------
+# ---------- Utilities ----------
 
 def _parse_money(val) -> float:
     """Terima 1.234.567 | 1,234.567 | 50.300,00 | (1.000) | 1.000- | IDR 1,000 CR | -2.500."""
@@ -155,26 +156,31 @@ def _concat_files(files) -> pd.DataFrame:
     for f in files:
         df = _read_any(f)
         if not df.empty:
-            df["__source__"] = f.name
+            df["__source__"] = f.name  # debug
             frames.append(df)
     return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
 
 
-def _get_date_range_input() -> Tuple[Optional[pd.Timestamp], Optional[pd.Timestamp]]:
-    """Ambil nilai date_input yang kadang bisa tuple/list/single date."""
-    val = st.date_input("Periode", value=None)
-    start = end = None
-    if isinstance(val, tuple) and len(val) == 2:
-        start, end = val
-    elif isinstance(val, list) and len(val) == 2:
-        start, end = val
-    # Convert to Timestamp
-    if start and end:
-        return pd.Timestamp(start), pd.Timestamp(end)
-    return None, None
+def _month_selector() -> Tuple[int, int]:
+    """Pilih Bulan & Tahun; default = bulan berjalan."""
+    from datetime import date
+    today = date.today()
+    years = list(range(today.year - 5, today.year + 2))
+    months = [
+        ("01", "Januari"), ("02", "Februari"), ("03", "Maret"), ("04", "April"),
+        ("05", "Mei"), ("06", "Juni"), ("07", "Juli"), ("08", "Agustus"),
+        ("09", "September"), ("10", "Oktober"), ("11", "November"), ("12", "Desember"),
+    ]
+    col1, col2 = st.columns(2)
+    with col1:
+        year = st.selectbox("Tahun", years, index=years.index(today.year))
+    with col2:
+        month_label = st.selectbox("Bulan", months, index=int(today.strftime("%m")) - 1, format_func=lambda x: x[1])
+        month = int(month_label[0])
+    return year, month
 
 
-# ---------------- App ----------------
+# ---------- App ----------
 
 st.set_page_config(page_title="Rekonsiliasi Tiket vs Settlement", layout="wide")
 st.title("Rekonsiliasi: Tiket Detail vs Settlement Dana")
@@ -192,9 +198,12 @@ with st.sidebar:
         accept_multiple_files=True,
     )
 
-    st.header("2) Parameter Tanggal (WAJIB)")
-    st.caption("Kolom Tanggal pada hasil akan mengikuti rentang ini.")
-    start_date, end_date = _get_date_range_input()
+    st.header("2) Parameter Bulan & Tahun (WAJIB)")
+    y, m = _month_selector()
+    # Hari pertama & terakhir bulan
+    month_start = pd.Timestamp(y, m, 1)
+    month_end = pd.Timestamp(y, m, calendar.monthrange(y, m)[1])
+    st.caption(f"Periode dipakai: {month_start.date()} s/d {month_end.date()}")
 
     st.header("3) Opsi")
     show_preview = st.checkbox("Tampilkan pratinjau", value=False)
@@ -212,11 +221,6 @@ if show_preview:
         st.markdown(f"Settlement Dana (rows: {len(settle_df)})"); st.dataframe(settle_df.head(50), use_container_width=True)
 
 if go:
-    # Validasi tanggal
-    if not (start_date and end_date and start_date <= end_date):
-        st.error("Mohon pilih rentang tanggal yang valid (Start ≤ End).")
-        st.stop()
-
     # Mapping tetap sesuai spesifikasi
     t_date = _find_col(tiket_df, ["Action date"])
     t_amt  = _find_col(tiket_df, ["tarif"])
@@ -245,33 +249,28 @@ if go:
     td = tiket_df.copy()
     td[t_date] = td[t_date].apply(_to_date)
     td = td[~td[t_date].isna()]
-    # filter status/bank
     td_stat = td[t_stat].astype(str).str.strip().str.lower()
     td_bank = td[t_bank].astype(str).str.strip().str.lower()
     td = td[td_stat.eq("paid") & td_bank.eq("espay")]
-    # filter rentang tanggal PARAMETER
-    td = td[(td[t_date] >= start_date) & (td[t_date] <= end_date)]
+    # keep only rows inside chosen month
+    td = td[(td[t_date] >= month_start) & (td[t_date] <= month_end)]
     td[t_amt] = _to_num(td[t_amt])
     tiket_by_date = td.groupby(td[t_date])[t_amt].sum()
+    tiket_by_date.index = pd.to_datetime(tiket_by_date.index).date
 
     # --- Settlement Dana ---
     sd = settle_df.copy()
     sd[s_date] = sd[s_date].apply(_to_date)
     sd = sd[~sd[s_date].isna()]
-    # filter rentang tanggal PARAMETER
-    sd = sd[(sd[s_date] >= start_date) & (sd[s_date] <= end_date)]
+    sd = sd[(sd[s_date] >= month_start) & (sd[s_date] <= month_end)]
     if show_debug:
         st.info(f"Contoh Settlement Amount (raw → parsed): {sd[s_amt].head(3).tolist()} → {_to_num(sd[s_amt].head(3)).tolist()}")
     sd[s_amt] = _to_num(sd[s_amt])
     settle_by_date = sd.groupby(sd[s_date])[s_amt].sum()
-
-    # --- Bangun kolom Tanggal dari PARAMETER ---
-    all_dates = [d.date() for d in pd.date_range(start_date, end_date, freq="D")]
-    idx = pd.Index(all_dates, name="Tanggal")
-
-    # Reindex ke tanggal parameter
-    tiket_by_date.index = pd.to_datetime(tiket_by_date.index).date
     settle_by_date.index = pd.to_datetime(settle_by_date.index).date
+
+    # --- Index tanggal dari parameter (1..akhir bulan) ---
+    idx = pd.Index(pd.date_range(month_start, month_end, freq="D").date, name="Tanggal")
     tiket_series = tiket_by_date.reindex(idx, fill_value=0.0)
     settle_series = settle_by_date.reindex(idx, fill_value=0.0)
 
@@ -295,7 +294,7 @@ if go:
     for c in ["Tiket Detail", "Settlement Dana", "Selisih"]:
         fmt[c] = fmt[c].apply(_idr_fmt)
 
-    st.subheader("Hasil Rekonsiliasi per Tanggal")
+    st.subheader("Hasil Rekonsiliasi per Tanggal (mengikuti bulan parameter)")
     st.dataframe(fmt, use_container_width=True, hide_index=True)
 
     # Export
@@ -306,7 +305,7 @@ if go:
     st.download_button(
         "Unduh Excel",
         data=bio.getvalue(),
-        file_name="rekonsiliasi_tiket_vs_settlement.xlsx",
+        file_name=f"rekonsiliasi_{y}-{m:02d}.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         use_container_width=True,
     )
