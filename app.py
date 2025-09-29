@@ -1,14 +1,18 @@
 # app.py
 # -*- coding: utf-8 -*-
 """
-Rekonsiliasi: Tiket Detail vs Settlement Dana (multi-file + filter tanggal + perbaikan groupby)
+Rekonsiliasi: Tiket Detail vs Settlement Dana
+- Multi-file upload untuk kedua sumber
+- Parser uang/tanggal robust (format Eropa & serial Excel)
+- Filter Tiket: St Bayar='paid' & Bank='ESPAY'
+- Kolom Tanggal pada hasil SELALU mengikuti rentang tanggal parameter
 """
 
 from __future__ import annotations
 
 import io
 import re
-from typing import Optional, List
+from typing import Optional, List, Tuple
 
 import numpy as np
 import pandas as pd
@@ -19,7 +23,7 @@ from dateutil import parser as dtparser
 # ---------------- Utilities ----------------
 
 def _parse_money(val) -> float:
-    """Robust parser: 1.234.567 | 1,234.567 | 50.300,00 | (1.000) | 1.000- | IDR 1,000 CR | -2.500."""
+    """Terima 1.234.567 | 1,234.567 | 50.300,00 | (1.000) | 1.000- | IDR 1,000 CR | -2.500."""
     if val is None or (isinstance(val, float) and np.isnan(val)):
         return 0.0
     if isinstance(val, (int, float, np.number)):
@@ -156,6 +160,20 @@ def _concat_files(files) -> pd.DataFrame:
     return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
 
 
+def _get_date_range_input() -> Tuple[Optional[pd.Timestamp], Optional[pd.Timestamp]]:
+    """Ambil nilai date_input yang kadang bisa tuple/list/single date."""
+    val = st.date_input("Periode", value=None)
+    start = end = None
+    if isinstance(val, tuple) and len(val) == 2:
+        start, end = val
+    elif isinstance(val, list) and len(val) == 2:
+        start, end = val
+    # Convert to Timestamp
+    if start and end:
+        return pd.Timestamp(start), pd.Timestamp(end)
+    return None, None
+
+
 # ---------------- App ----------------
 
 st.set_page_config(page_title="Rekonsiliasi Tiket vs Settlement", layout="wide")
@@ -174,15 +192,9 @@ with st.sidebar:
         accept_multiple_files=True,
     )
 
-    st.header("2) Parameter Tanggal")
-    date_mode = st.radio("Filter tanggal", ["Semua", "Rentang"], horizontal=True, index=0)
-    if date_mode == "Rentang":
-        from datetime import date, timedelta
-        default_end = date.today()
-        default_start = default_end - timedelta(days=30)
-        start_date, end_date = st.date_input("Periode", value=(default_start, default_end))
-    else:
-        start_date = end_date = None
+    st.header("2) Parameter Tanggal (WAJIB)")
+    st.caption("Kolom Tanggal pada hasil akan mengikuti rentang ini.")
+    start_date, end_date = _get_date_range_input()
 
     st.header("3) Opsi")
     show_preview = st.checkbox("Tampilkan pratinjau", value=False)
@@ -200,6 +212,11 @@ if show_preview:
         st.markdown(f"Settlement Dana (rows: {len(settle_df)})"); st.dataframe(settle_df.head(50), use_container_width=True)
 
 if go:
+    # Validasi tanggal
+    if not (start_date and end_date and start_date <= end_date):
+        st.error("Mohon pilih rentang tanggal yang valid (Start ≤ End).")
+        st.stop()
+
     # Mapping tetap sesuai spesifikasi
     t_date = _find_col(tiket_df, ["Action date"])
     t_amt  = _find_col(tiket_df, ["tarif"])
@@ -228,36 +245,39 @@ if go:
     td = tiket_df.copy()
     td[t_date] = td[t_date].apply(_to_date)
     td = td[~td[t_date].isna()]
+    # filter status/bank
     td_stat = td[t_stat].astype(str).str.strip().str.lower()
     td_bank = td[t_bank].astype(str).str.strip().str.lower()
     td = td[td_stat.eq("paid") & td_bank.eq("espay")]
-    if start_date and end_date:
-        td = td[(td[t_date] >= pd.Timestamp(start_date)) & (td[t_date] <= pd.Timestamp(end_date))]
+    # filter rentang tanggal PARAMETER
+    td = td[(td[t_date] >= start_date) & (td[t_date] <= end_date)]
     td[t_amt] = _to_num(td[t_amt])
-
-    # >>> FIX: selalu ambil Series; jangan pakai .squeeze()
     tiket_by_date = td.groupby(td[t_date])[t_amt].sum()
-    # aman set index ke date object
-    tiket_by_date.index = pd.Index(pd.to_datetime(tiket_by_date.index).date, name="Tanggal")
 
     # --- Settlement Dana ---
     sd = settle_df.copy()
     sd[s_date] = sd[s_date].apply(_to_date)
     sd = sd[~sd[s_date].isna()]
-    if start_date and end_date:
-        sd = sd[(sd[s_date] >= pd.Timestamp(start_date)) & (sd[s_date] <= pd.Timestamp(end_date))]
+    # filter rentang tanggal PARAMETER
+    sd = sd[(sd[s_date] >= start_date) & (sd[s_date] <= end_date)]
     if show_debug:
         st.info(f"Contoh Settlement Amount (raw → parsed): {sd[s_amt].head(3).tolist()} → {_to_num(sd[s_amt].head(3)).tolist()}")
     sd[s_amt] = _to_num(sd[s_amt])
-
     settle_by_date = sd.groupby(sd[s_date])[s_amt].sum()
-    settle_by_date.index = pd.Index(pd.to_datetime(settle_by_date.index).date, name="Tanggal")
 
-    # --- Merge + Diff ---
-    all_dates = sorted(set(tiket_by_date.index) | set(settle_by_date.index))
-    final = pd.DataFrame(index=pd.Index(all_dates, name="Tanggal"))
-    final["Tiket Detail"] = tiket_by_date.reindex(all_dates).fillna(0.0)
-    final["Settlement Dana"] = settle_by_date.reindex(all_dates).fillna(0.0)
+    # --- Bangun kolom Tanggal dari PARAMETER ---
+    all_dates = [d.date() for d in pd.date_range(start_date, end_date, freq="D")]
+    idx = pd.Index(all_dates, name="Tanggal")
+
+    # Reindex ke tanggal parameter
+    tiket_by_date.index = pd.to_datetime(tiket_by_date.index).date
+    settle_by_date.index = pd.to_datetime(settle_by_date.index).date
+    tiket_series = tiket_by_date.reindex(idx, fill_value=0.0)
+    settle_series = settle_by_date.reindex(idx, fill_value=0.0)
+
+    final = pd.DataFrame(index=idx)
+    final["Tiket Detail"] = tiket_series.values
+    final["Settlement Dana"] = settle_series.values
     final["Selisih"] = final["Tiket Detail"] - final["Settlement Dana"]
 
     # View + total
