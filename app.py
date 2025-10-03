@@ -4,9 +4,9 @@
 Rekonsiliasi: Tiket Detail vs Settlement Dana
 - Bulan & Tahun → tanggal 1..akhir bulan
 - Multi-file upload (Tiket Excel; Settlement CSV/Excel)
-- Tiket: Action diturunkan dari 'Created' + aturan midnight (WIB 0, WITA -1, WIT -2), filter St Bayar='paid' & Bank='ESPAY'
-- Settlement Dana ESPAY: pakai Transaction Date
-- Settlement Dana BCA/Non BCA: pakai Settlement Date (Product Name='BCA VA Online')
+- Tiket: Action dihitung dari 'Created' (+ shift midnight WIB 0 / WITA -1 / WIT -2), filter St Bayar='paid' & Bank contains 'espay'
+- Settlement Dana ESPAY: Transaction Date
+- Settlement Dana BCA/Non BCA: Settlement Date (Product Name='BCA VA Online')
 """
 
 from __future__ import annotations
@@ -14,14 +14,15 @@ from __future__ import annotations
 import io
 import re
 import calendar
-from typing import Optional, List, Tuple
+from typing import Optional, List, Tuple, Iterable
 
 import numpy as np
 import pandas as pd
 import streamlit as st
 from dateutil import parser as dtparser
 
-# ---------------- Utilities ----------------
+
+# ---------- Helpers ----------
 
 def _parse_money(val) -> float:
     if val is None or (isinstance(val, float) and np.isnan(val)):
@@ -40,10 +41,10 @@ def _parse_money(val) -> float:
     s = re.sub(r"[^0-9\.,\-]", "", s).strip()
     if s.startswith("-"):
         neg, s = True, s[1:].strip()
-    last_dot, last_com = s.rfind("."), s.rfind(",")
-    if last_dot == -1 and last_com == -1:
+    d, c = s.rfind("."), s.rfind(",")
+    if d == -1 and c == -1:
         num_s = s
-    elif last_dot > last_com:
+    elif d > c:
         num_s = s.replace(",", "")
     else:
         num_s = s.replace(".", "").replace(",", ".")
@@ -88,32 +89,11 @@ def _to_date(val) -> Optional[pd.Timestamp]:
     return dt.normalize() if dt is not None else None
 
 
-def _read_any(uploaded_file) -> pd.DataFrame:
-    if not uploaded_file:
-        return pd.DataFrame()
-    name = uploaded_file.name.lower()
-    try:
-        if name.endswith(".csv"):
-            for enc in ("utf-8-sig", "utf-8", "cp1252", "iso-8859-1"):
-                try:
-                    uploaded_file.seek(0)
-                    return pd.read_csv(
-                        uploaded_file,
-                        encoding=enc,
-                        sep=None,
-                        engine="python",
-                        dtype=str,
-                        na_filter=False,
-                    )
-                except Exception:
-                    continue
-            st.error(f"CSV gagal dibaca: {uploaded_file.name}. Simpan ulang sebagai UTF-8.")
-            return pd.DataFrame()
-        else:
-            return pd.read_excel(uploaded_file, engine="openpyxl")
-    except Exception as e:
-        st.error(f"Gagal membaca {uploaded_file.name}: {e}")
-        return pd.DataFrame()
+def _norm_label(s: str) -> str:
+    if s is None or (isinstance(s, float) and np.isnan(s)):
+        return ""
+    s = str(s).strip().lower()
+    return re.sub(r"\s+", " ", s)
 
 
 def _find_col(df: pd.DataFrame, names: List[str]) -> Optional[str]:
@@ -122,10 +102,10 @@ def _find_col(df: pd.DataFrame, names: List[str]) -> Optional[str]:
     cols = [c for c in df.columns if isinstance(c, str)]
     m = {c.lower().strip(): c for c in cols}
     for n in names:
-        key = n.lower().strip()
-        if key in m:
-            return m[key]
-    for n in names:
+        k = n.lower().strip()
+        if k in m:
+            return m[k]
+    for n in names:  # substring match
         key = n.lower().strip()
         for c in cols:
             if key in c.lower():
@@ -141,47 +121,96 @@ def _idr_fmt(n: float) -> str:
     return f"({s})" if neg else s
 
 
-def _concat_files(files) -> pd.DataFrame:
+# ---------- Readers (header guessing) ----------
+
+def _guess_header_row(df_no_header: pd.DataFrame, targets: Iterable[str]) -> int:
+    scan = min(20, len(df_no_header))
+    best_row, best_score = 0, -1
+    for i in range(scan):
+        row = df_no_header.iloc[i].astype(str).str.lower().str.strip().fillna("")
+        text = " ".join(row.tolist())
+        score = sum(1 for t in targets if t in text)
+        if score > best_score:
+            best_row, best_score = i, score
+            if score >= 3:
+                break
+    return best_row
+
+
+def _read_tiket_file(f) -> pd.DataFrame:
+    """Baca Excel Tiket dengan auto-deteksi header (atasi baris judul/merge)."""
+    try:
+        f.seek(0)
+        raw = pd.read_excel(f, engine="openpyxl", header=None, dtype=str)
+        if raw.empty:
+            return pd.DataFrame()
+        targets = ["created", "action", "tarif", "st bayar", "status", "bank", "channel"]
+        header_row = _guess_header_row(raw, targets)
+        f.seek(0)
+        df = pd.read_excel(f, engine="openpyxl", header=header_row, dtype=str)
+        df["__source__"] = f.name
+        return df
+    except Exception as e:
+        st.error(f"Gagal membaca Tiket: {f.name} → {e}")
+        return pd.DataFrame()
+
+
+def _read_settle_file(f) -> pd.DataFrame:
+    try:
+        low = f.name.lower()
+        if low.endswith(".csv"):
+            for enc in ("utf-8-sig", "utf-8", "cp1252", "iso-8859-1"):
+                try:
+                    f.seek(0)
+                    df = pd.read_csv(f, encoding=enc, sep=None, engine="python", dtype=str, na_filter=False)
+                    df["__source__"] = f.name
+                    return df
+                except Exception:
+                    continue
+            st.error(f"CSV gagal dibaca: {f.name}. Simpan ulang sebagai UTF-8.")
+            return pd.DataFrame()
+        else:
+            f.seek(0)
+            df = pd.read_excel(f, engine="openpyxl", dtype=str)
+            df["__source__"] = f.name
+            return df
+    except Exception as e:
+        st.error(f"Gagal membaca Settlement: {f.name} → {e}")
+        return pd.DataFrame()
+
+
+def _concat(files, reader) -> pd.DataFrame:
     if not files:
         return pd.DataFrame()
     frames = []
     for f in files:
-        df = _read_any(f)
+        df = reader(f)
         if not df.empty:
-            df["__source__"] = f.name  # audit
             frames.append(df)
     return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
 
+
+# ---------- Business ----------
 
 def _month_selector() -> Tuple[int, int]:
     from datetime import date
     today = date.today()
     years = list(range(today.year - 5, today.year + 2))
-    months = [
-        ("01", "Januari"), ("02", "Februari"), ("03", "Maret"), ("04", "April"),
-        ("05", "Mei"), ("06", "Juni"), ("07", "Juli"), ("08", "Agustus"),
-        ("09", "September"), ("10", "Oktober"), ("11", "November"), ("12", "Desember"),
-    ]
+    months = [("01","Januari"),("02","Februari"),("03","Maret"),("04","April"),
+              ("05","Mei"),("06","Juni"),("07","Juli"),("08","Agustus"),
+              ("09","September"),("10","Oktober"),("11","November"),("12","Desember")]
     c1, c2 = st.columns(2)
     with c1:
         year = st.selectbox("Tahun", years, index=years.index(today.year))
     with c2:
-        sel = st.selectbox("Bulan", months, index=int(today.strftime("%m")) - 1, format_func=lambda x: x[1])
+        sel = st.selectbox("Bulan", months, index=int(today.strftime("%m"))-1, format_func=lambda x: x[1])
         month = int(sel[0])
     return year, month
 
 
-def _norm_label(s: str) -> str:
-    if s is None or (isinstance(s, float) and np.isnan(s)):
-        return ""
-    s = str(s).strip().lower()
-    s = re.sub(r"\s+", " ", s)
-    return s
-
-
 def _derive_action_from_created(created_sr: pd.Series, zone: str) -> pd.Series:
-    """Turunkan tanggal Action dari 'Created'. Jika jam==00.xx, mundurkan hari sesuai zona.
-    WIB: 0; WITA: 1; WIT: 2."""
+    """Ambil tanggal dari 'Created' + shift midnight:
+       WIB: 0, WITA: -1, WIT: -2 (00:00–00:59)."""
     zone = (zone or "").upper()
     minus_days = 0
     if "WITA" in zone:
@@ -195,34 +224,26 @@ def _derive_action_from_created(created_sr: pd.Series, zone: str) -> pd.Series:
             return None
         d = pd.Timestamp(dt.date())
         if dt.hour == 0 and minus_days > 0:
-            # why: midnight shift untuk cabang di timur agar jatuh ke hari operasional lokal
-            d = d - pd.Timedelta(days=minus_days)
+            d = d - pd.Timedelta(days=minus_days)  # why: sesuaikan hari operasional lokal
         return d
 
     return created_sr.apply(conv)
 
-# ---------------- App ----------------
+
+# ---------- App ----------
 
 st.set_page_config(page_title="Rekonsiliasi Tiket vs Settlement", layout="wide")
 st.title("Rekonsiliasi: Tiket Detail vs Settlement Dana")
 
 with st.sidebar:
     st.header("1) Upload Sumber (multi-file)")
-    tiket_files = st.file_uploader(
-        "Tiket Detail (Excel .xls/.xlsx)",
-        type=["xls", "xlsx"],
-        accept_multiple_files=True,
-    )
-    settle_files = st.file_uploader(
-        "Settlement Dana (CSV/Excel)",
-        type=["csv", "xls", "xlsx"],
-        accept_multiple_files=True,
-    )
+    tiket_files = st.file_uploader("Tiket Detail (Excel .xls/.xlsx)", type=["xls", "xlsx"], accept_multiple_files=True)
+    settle_files = st.file_uploader("Settlement Dana (CSV/Excel)", type=["csv", "xls", "xlsx"], accept_multiple_files=True)
 
     st.header("2) Parameter Bulan & Tahun (WAJIB)")
     y, m = _month_selector()
     month_start = pd.Timestamp(y, m, 1)
-    month_end = pd.Timestamp(y, m, calendar.monthrange(y, m)[1])
+    month_end   = pd.Timestamp(y, m, calendar.monthrange(y, m)[1])
     st.caption(f"Periode dipakai: {month_start.date()} s/d {month_end.date()}")
 
     st.header("3) Zona Waktu Cabang")
@@ -230,16 +251,21 @@ with st.sidebar:
 
     go = st.button("Proses", type="primary", use_container_width=True)
 
-# baca
-tiket_df = _concat_files(tiket_files)
-settle_df = _concat_files(settle_files)
+tiket_df  = _concat(tiket_files, _read_tiket_file)
+settle_df = _concat(settle_files, _read_settle_file)
 
 if go:
-    # Kolom yang dipakai
-    t_created = _find_col(tiket_df, ["Created", "Created Date", "Create Date", "Created (WIB)", "Created Time", "Action", "Action date"])
-    t_amt  = _find_col(tiket_df, ["tarif", "fare", "nominal", "amount", "total"])
-    t_stat = _find_col(tiket_df, ["St Bayar", "Status Bayar", "status bayar", "status"])
-    t_bank = _find_col(tiket_df, ["Bank", "Payment Channel", "channel", "payment method"])
+    # --- Auto mapping dengan sinonim kolom ---
+    created_candidates = ["created", "created date", "create date", "created (wib)", "created time",
+                          "action", "action date", "tanggal", "tgl"]
+    amount_candidates  = ["tarif", "fare", "amount", "nominal", "total", "harga"]
+    status_candidates  = ["st bayar", "status bayar", "status"]
+    bank_candidates    = ["bank", "payment channel", "channel", "payment method", "bank/ewallet"]
+
+    t_created = _find_col(tiket_df, created_candidates)
+    t_amt     = _find_col(tiket_df, amount_candidates)
+    t_stat    = _find_col(tiket_df, status_candidates)
+    t_bank    = _find_col(tiket_df, bank_candidates)
 
     s_txn_date    = _find_col(settle_df, ["Transaction Date", "Trans Date", "Tanggal Transaksi"])
     s_settle_date = _find_col(settle_df, ["Settlement Date", "SettlementDate", "Tanggal Settlement"])
@@ -247,16 +273,39 @@ if go:
     s_prod        = _find_col(settle_df, ["Product Name", "Product", "ProductName", "Nama Produk"])
 
     missing = []
-    for name, col, src in [
-        ("Created/Action", t_created, "Tiket Detail"),
-        ("tarif/amount",  t_amt,     "Tiket Detail"),
-        ("St Bayar/Status", t_stat,  "Tiket Detail"),
-        ("Bank/Channel", t_bank,     "Tiket Detail"),
-        ("Transaction Date", s_txn_date, "Settlement Dana (Total)"),
-        ("Settlement Amount", s_amt,     "Settlement Dana"),
-    ]:
-        if col is None:
-            missing.append(f"{src}: {name}")
+    if t_created is None: missing.append("Tiket Detail: Created/Action")
+    if t_amt is None:     missing.append("Tiket Detail: tarif/amount")
+    if t_stat is None:    missing.append("Tiket Detail: St Bayar/Status")
+    if t_bank is None:    missing.append("Tiket Detail: Bank/Channel")
+
+    # ----- Mapping manual jika auto gagal -----
+    if missing:
+        with st.expander("⚙️ Map kolom Tiket secara manual (auto tidak menemukan)"):
+            st.write("Pilih kolom yang sesuai dari daftar berikut.")
+            cols = list(tiket_df.columns)
+            def pick(default_keys: List[str]) -> Optional[str]:
+                # pilih default bila ada kandidat yang cocok
+                auto = _find_col(tiket_df, default_keys)
+                return st.selectbox(", ".join(default_keys), ["-- pilih --"] + cols,
+                                    index=(cols.index(auto) + 1) if auto in cols else 0)
+            c_created = pick(created_candidates)
+            c_amt     = pick(amount_candidates)
+            c_stat    = pick(status_candidates)
+            c_bank    = pick(bank_candidates)
+
+        # terapkan pilihan user jika valid
+        if c_created and c_created != "-- pilih --": t_created = c_created
+        if c_amt and c_amt != "-- pilih --":         t_amt     = c_amt
+        if c_stat and c_stat != "-- pilih --":       t_stat    = c_stat
+        if c_bank and c_bank != "-- pilih --":       t_bank    = c_bank
+
+    # cek lagi setelah manual mapping
+    missing = []
+    if t_created is None: missing.append("Tiket Detail: Created/Action")
+    if t_amt is None:     missing.append("Tiket Detail: tarif/amount")
+    if t_stat is None:    missing.append("Tiket Detail: St Bayar/Status")
+    if t_bank is None:    missing.append("Tiket Detail: Bank/Channel")
+
     if missing:
         st.error("Kolom wajib tidak ditemukan → " + "; ".join(missing))
         if not tiket_df.empty:
@@ -264,16 +313,21 @@ if go:
         if not settle_df.empty:
             st.write("Kolom Settlement tersedia:", list(settle_df.columns))
         st.stop()
-    if s_settle_date is None or s_prod is None:
-        st.warning("Kolom 'Settlement Date' atau 'Product Name' tidak ditemukan. Kolom BCA/Non-BCA akan 0.")
 
-    # --- Tiket Detail (Action dari Created) ---
+    if s_txn_date is None or s_amt is None:
+        st.error("Kolom Settlement wajib tidak ditemukan → Settlement: Transaction Date / Settlement Amount")
+        st.write("Kolom Settlement tersedia:", list(settle_df.columns))
+        st.stop()
+    if s_settle_date is None or s_prod is None:
+        st.warning("Kolom 'Settlement Date' atau 'Product Name' tidak ditemukan. BCA/Non-BCA akan 0.")
+
+    # --- Tiket Detail: derive Action dari Created + filter paid & espay ---
     td = tiket_df.copy()
     td["__action_date"] = _derive_action_from_created(td[t_created], zone)
     td = td[~td["__action_date"].isna()]
     td_stat_v = td[t_stat].astype(str).str.strip().str.lower()
     td_bank_v = td[t_bank].astype(str).str.strip().str.lower()
-    td = td[td_stat_v.eq("paid") & td_bank_v.eq("espay")]
+    td = td[td_stat_v.eq("paid") & td_bank_v.str.contains("espay")]
     td = td[(td["__action_date"] >= month_start) & (td["__action_date"] <= month_end)]
     td[t_amt] = _to_num(td[t_amt])
 
@@ -307,7 +361,7 @@ if go:
         settle_bca = pd.Series(dtype=float)
         settle_nonbca = pd.Series(dtype=float)
 
-    # --- Index tanggal 1..akhir bulan & reindex ---
+    # --- Reindex ke 1..akhir bulan ---
     idx = pd.Index(pd.date_range(month_start, month_end, freq="D").date, name="Tanggal")
 
     def _reidx(s: pd.Series) -> pd.Series:
@@ -330,7 +384,6 @@ if go:
     final["Settlement Dana BCA"]     = bca_series.values
     final["Settlement Dana Non BCA"] = nonbca_series.values
 
-    # View + TOTAL
     view = final.reset_index()
     view.insert(0, "No", range(1, len(view) + 1))
     total_row = pd.DataFrame([{
@@ -351,7 +404,7 @@ if go:
     st.subheader("Hasil Rekonsiliasi per Tanggal (mengikuti bulan parameter)")
     st.dataframe(fmt, use_container_width=True, hide_index=True)
 
-    # Export Excel
+    # Unduh Excel
     out = io.BytesIO()
     with pd.ExcelWriter(out, engine="openpyxl") as xw:
         view_total.to_excel(xw, index=False, sheet_name="Rekonsiliasi")
