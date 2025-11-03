@@ -6,7 +6,12 @@ Rekonsiliasi: Tiket Detail vs Settlement Dana
 - Multi-file upload (Tiket Excel; Settlement CSV/Excel)
 - Parser uang/tanggal robust (format Eropa & serial Excel)
 - Tiket difilter: St Bayar mengandung 'paid/success/sukses/settled/lunas' & Bank mengandung 'ESPAY'
-- Tambahan kolom: Settlement BCA (Product Name == "BCA VA Online") & Settlement Non BCA (selain itu)
+- Settlement:
+    * Amount dari kolom L (Settlement Amount)
+    * Tanggal dari kolom E (Settlement Date)
+    * Klasifikasi dari kolom P (Product Name):
+        - Settlement BCA     = Product Name == "BCA VA Online"
+        - Settlement Non BCA = selain itu
 """
 
 from __future__ import annotations
@@ -194,12 +199,18 @@ if go:
     t_stat = _find_col(tiket_df, ["St Bayar","Status Bayar","status","status bayar"])
     t_bank = _find_col(tiket_df, ["Bank","Payment Channel","channel","payment method"])
 
-    # --- Settlement: tanggal + Settlement Amount (fallback ke kolom L) + Product Name ---
-    s_date    = _find_col(settle_df, ["Transaction Date","Tanggal Transaksi","Tanggal"])
-    s_amt     = _find_col(settle_df, ["Settlement Amount","Amount","Nominal","Jumlah"])
-    if s_amt is None and not settle_df.empty and len(settle_df.columns) >= 12:
-        s_amt = settle_df.columns[11]  # fallback ke kolom L
-    s_product = _find_col(settle_df, ["Product Name","Produk","Nama Produk"])
+    # --- Settlement: wajib L (Settlement Amount), E (Settlement Date), P (Product Name) ---
+    # Header utama:
+    s_date_hdr = _find_col(settle_df, ["Settlement Date","Tanggal Settlement","Settle Date","Tanggal"])
+    s_amt_hdr  = _find_col(settle_df, ["Settlement Amount","Amount","Nominal","Jumlah"])
+    s_prod_hdr = _find_col(settle_df, ["Product Name","Produk","Nama Produk"])
+
+    # Fallback by position jika header tak ketemu:
+    # E = index 4 ; L = index 11 ; P = index 15
+    if not settle_df.empty:
+        if s_date_hdr is None and len(settle_df.columns) >= 5:  s_date_hdr = settle_df.columns[4]
+        if s_amt_hdr  is None and len(settle_df.columns) >= 12: s_amt_hdr  = settle_df.columns[11]
+        if s_prod_hdr is None and len(settle_df.columns) >= 16: s_prod_hdr = settle_df.columns[15]
 
     missing = []
     for name, col, src in [
@@ -207,9 +218,9 @@ if go:
         ("tarif/amount", t_amt, "Tiket Detail"),
         ("St Bayar/Status", t_stat, "Tiket Detail"),
         ("Bank/Channel", t_bank, "Tiket Detail"),
-        ("Transaction Date", s_date, "Settlement Dana"),
-        ("Settlement Amount (atau kolom L)", s_amt, "Settlement Dana"),
-        ("Product Name", s_product, "Settlement Dana"),
+        ("Settlement Date (kolom E)", s_date_hdr, "Settlement Dana"),
+        ("Settlement Amount (kolom L)", s_amt_hdr, "Settlement Dana"),
+        ("Product Name (kolom P)", s_prod_hdr, "Settlement Dana"),
     ]:
         if col is None: missing.append(f"{src}: {name}")
     if missing:
@@ -229,21 +240,21 @@ if go:
     td[t_amt] = _to_num(td[t_amt])
     tiket_by_date = td.groupby(td[t_date].dt.date, dropna=True)[t_amt].sum()
 
-    # --- Settlement Dana (Total + BCA/Non-BCA dari Settlement Amount, via Product Name) ---
+    # --- Settlement Dana (Amount=L, Date=E, Product=P) ---
     sd = settle_df.copy()
-    sd[s_date] = sd[s_date].apply(_to_date)
-    sd = sd[~sd[s_date].isna()]
-    sd = sd[(sd[s_date] >= month_start) & (sd[s_date] <= month_end)]
-    sd[s_amt] = _to_num(sd[s_amt])
+    sd[s_date_hdr] = sd[s_date_hdr].apply(_to_date)
+    sd = sd[~sd[s_date_hdr].isna()]
+    sd = sd[(sd[s_date_hdr] >= month_start) & (sd[s_date_hdr] <= month_end)]
 
-    # klasifikasi berdasarkan Product Name
-    prod_norm = sd[s_product].astype(str).str.strip().str.casefold()
-    bca_mask = (prod_norm == "bca va online".casefold())
+    sd[s_amt_hdr] = _to_num(sd[s_amt_hdr])
 
-    # agregasi
-    settle_by_date_total   = sd.groupby(sd[s_date].dt.date, dropna=True)[s_amt].sum()
-    settle_by_date_bca     = sd.loc[bca_mask].groupby(sd[s_date].dt.date, dropna=True)[s_amt].sum()
-    settle_by_date_non_bca = sd.loc[~bca_mask].groupby(sd[s_date].dt.date, dropna=True)[s_amt].sum()
+    prod_norm = sd[s_prod_hdr].astype(str).str.strip().str.casefold()
+    bca_mask  = (prod_norm == "bca va online".casefold())
+
+    # agregasi per-tanggal:
+    settle_by_date_total   = sd.groupby(sd[s_date_hdr].dt.date, dropna=True)[s_amt_hdr].sum()
+    settle_by_date_bca     = sd.loc[bca_mask].groupby(sd[s_date_hdr].dt.date, dropna=True)[s_amt_hdr].sum()
+    settle_by_date_non_bca = sd.loc[~bca_mask].groupby(sd[s_date_hdr].dt.date, dropna=True)[s_amt_hdr].sum()
 
     # --- Index tanggal (1..akhir bulan) ---
     idx = pd.Index(pd.date_range(month_start, month_end, freq="D").date, name="Tanggal")
@@ -257,8 +268,8 @@ if go:
     final["Tiket Detail ESPAY"] = tiket_series.values
     final["Settlement Dana"]    = settle_series.values
     final["Selisih"]            = final["Tiket Detail ESPAY"] - final["Settlement Dana"]
-    final["Settlement BCA"]     = bca_series.values       # Product Name == "BCA VA Online"
-    final["Settlement Non BCA"] = non_bca_series.values   # selain "BCA VA Online"
+    final["Settlement BCA"]     = bca_series.values
+    final["Settlement Non BCA"] = non_bca_series.values
 
     # View + total
     view = final.reset_index()
@@ -280,6 +291,10 @@ if go:
 
     st.subheader("Hasil Rekonsiliasi per Tanggal (mengikuti bulan parameter)")
     st.dataframe(fmt, use_container_width=True, hide_index=True)
+
+    # Debug info opsional
+    if show_debug:
+        st.caption(f"Settlement Date dipakai: **{s_date_hdr}** | Settlement Amount dipakai: **{s_amt_hdr}** | Product Name dipakai: **{s_prod_hdr}**")
 
     # Export
     bio = io.BytesIO()
