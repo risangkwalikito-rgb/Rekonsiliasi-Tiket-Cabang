@@ -6,12 +6,10 @@ Rekonsiliasi: Tiket Detail vs Settlement Dana
 - Multi-file upload (Tiket Excel; Settlement CSV/Excel)
 - Parser uang/tanggal robust (format Eropa & serial Excel)
 - Tiket difilter: St Bayar mengandung 'paid/success/sukses/settled/lunas' & Bank mengandung 'ESPAY'
-- Settlement:
-    * Amount dari kolom L (Settlement Amount)
-    * Tanggal dari kolom E (Settlement Date)
-    * Klasifikasi dari kolom P (Product Name):
-        - Settlement BCA     = Product Name == "BCA VA Online"
-        - Settlement Non BCA = selain itu
+- Settlement Dana: KEMBALI seperti semula (Transaction Date + Settlement Amount/L)
+- Tambahan kolom:
+    * Settlement BCA:    Amount=L, tanggal=Settlement Date(E), Product Name(P) == "BCA VA Online"
+    * Settlement Non BCA:Amount=L, tanggal=Settlement Date(E), Product Name(P) != "BCA VA Online"
 """
 
 from __future__ import annotations
@@ -20,7 +18,6 @@ import io
 import re
 import calendar
 from typing import Optional, List, Tuple
-
 import numpy as np
 import pandas as pd
 import streamlit as st
@@ -62,9 +59,7 @@ def _parse_money(val) -> float:
 def _to_num(sr: pd.Series) -> pd.Series:
     return sr.apply(_parse_money).astype(float)
 
-# --- Date parser (day-first + Excel serial) ---
 _ddmmyyyy = re.compile(r"\b(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{2,4})\b")
-
 def _to_date(val) -> Optional[pd.Timestamp]:
     if pd.isna(val):
         return None
@@ -100,7 +95,7 @@ def _read_any(uploaded_file) -> pd.DataFrame:
     name = uploaded_file.name.lower()
     try:
         if name.endswith(".csv"):
-            for enc in ("utf-8-sig", "utf-8", "cp1252", "iso-8859-1"):
+            for enc in ("utf-8-sig","utf-8","cp1252","iso-8859-1"):
                 try:
                     uploaded_file.seek(0)
                     return pd.read_csv(uploaded_file, encoding=enc, sep=None, engine="python", dtype=str, na_filter=False)
@@ -190,37 +185,50 @@ if show_preview:
         st.markdown(f"Settlement Dana (rows: {len(settle_df)})"); st.dataframe(settle_df.head(50), use_container_width=True)
 
 if go:
-    # --- Tiket (tanggal prioritas Action/Action Date) ---
+    # --- Tiket: tanggal prioritas Action/Action Date ---
     t_date = _find_col(tiket_df, [
-        "Action/Action Date", "Action Date", "Action", "Action date",
-        "Paid Date", "Payment Date", "Tanggal Bayar", "Tanggal"
+        "Action/Action Date","Action Date","Action","Action date",
+        "Paid Date","Payment Date","Tanggal Bayar","Tanggal"
     ])
     t_amt  = _find_col(tiket_df, ["tarif","amount","nominal","jumlah","total"])
     t_stat = _find_col(tiket_df, ["St Bayar","Status Bayar","status","status bayar"])
     t_bank = _find_col(tiket_df, ["Bank","Payment Channel","channel","payment method"])
 
-    # --- Settlement: wajib L (Settlement Amount), E (Settlement Date), P (Product Name) ---
-    # Header utama:
-    s_date_hdr = _find_col(settle_df, ["Settlement Date","Tanggal Settlement","Settle Date","Tanggal"])
-    s_amt_hdr  = _find_col(settle_df, ["Settlement Amount","Amount","Nominal","Jumlah"])
-    s_prod_hdr = _find_col(settle_df, ["Product Name","Produk","Nama Produk"])
+    # --- Settlement Dana (SEPERTI SEMULA): Transaction Date + Settlement Amount ---
+    s_date_legacy = _find_col(settle_df, ["Transaction Date","Tanggal Transaksi","Tanggal"])
+    s_amt_legacy  = _find_col(settle_df, ["Settlement Amount","Amount","Nominal","Jumlah"])
+    if s_amt_legacy is None and not settle_df.empty and len(settle_df.columns) >= 12:
+        s_amt_legacy = settle_df.columns[11]  # fallback kolom L
+    # fallback tanggal jika Transaction Date tidak ada
+    if s_date_legacy is None:
+        # tetap ada fallback agar tidak putus kerja (boleh pakai Settlement Date/E)
+        s_date_legacy = _find_col(settle_df, ["Settlement Date","Tanggal Settlement","Settle Date","Tanggal"])
+        if s_date_legacy is None and not settle_df.empty and len(settle_df.columns) >= 5:
+            s_date_legacy = settle_df.columns[4]  # fallback kolom E
 
-    # Fallback by position jika header tak ketemu:
-    # E = index 4 ; L = index 11 ; P = index 15
-    if not settle_df.empty:
-        if s_date_hdr is None and len(settle_df.columns) >= 5:  s_date_hdr = settle_df.columns[4]
-        if s_amt_hdr  is None and len(settle_df.columns) >= 12: s_amt_hdr  = settle_df.columns[11]
-        if s_prod_hdr is None and len(settle_df.columns) >= 16: s_prod_hdr = settle_df.columns[15]
+    # --- Untuk BCA/Non-BCA: wajib E (Settlement Date) + L (Settlement Amount) + P (Product Name) ---
+    s_date_E = _find_col(settle_df, ["Settlement Date","Tanggal Settlement","Settle Date","Tanggal"])
+    s_amt_L  = _find_col(settle_df, ["Settlement Amount","Amount","Nominal","Jumlah"])
+    if s_amt_L is None and not settle_df.empty and len(settle_df.columns) >= 12:
+        s_amt_L = settle_df.columns[11]  # kolom L
+    s_prod_P = _find_col(settle_df, ["Product Name","Produk","Nama Produk"])
+    if s_date_E is None and not settle_df.empty and len(settle_df.columns) >= 5:
+        s_date_E = settle_df.columns[4]   # kolom E
+    if s_prod_P is None and not settle_df.empty and len(settle_df.columns) >= 16:
+        s_prod_P = settle_df.columns[15]  # kolom P
 
+    # --- Validasi minimal kolom ---
     missing = []
     for name, col, src in [
         ("Action/Action Date", t_date, "Tiket Detail"),
         ("tarif/amount", t_amt, "Tiket Detail"),
         ("St Bayar/Status", t_stat, "Tiket Detail"),
         ("Bank/Channel", t_bank, "Tiket Detail"),
-        ("Settlement Date (kolom E)", s_date_hdr, "Settlement Dana"),
-        ("Settlement Amount (kolom L)", s_amt_hdr, "Settlement Dana"),
-        ("Product Name (kolom P)", s_prod_hdr, "Settlement Dana"),
+        ("Transaction Date/Tanggal Transaksi", s_date_legacy, "Settlement Dana (utama)"),
+        ("Settlement Amount/L", s_amt_legacy, "Settlement Dana (utama)"),
+        ("Settlement Date/E", s_date_E, "BCA/Non-BCA"),
+        ("Settlement Amount/L", s_amt_L, "BCA/Non-BCA"),
+        ("Product Name/P", s_prod_P, "BCA/Non-BCA"),
     ]:
         if col is None: missing.append(f"{src}: {name}")
     if missing:
@@ -240,36 +248,41 @@ if go:
     td[t_amt] = _to_num(td[t_amt])
     tiket_by_date = td.groupby(td[t_date].dt.date, dropna=True)[t_amt].sum()
 
-    # --- Settlement Dana (Amount=L, Date=E, Product=P) ---
-    sd = settle_df.copy()
-    sd[s_date_hdr] = sd[s_date_hdr].apply(_to_date)
-    sd = sd[~sd[s_date_hdr].isna()]
-    sd = sd[(sd[s_date_hdr] >= month_start) & (sd[s_date_hdr] <= month_end)]
+    # --- Settlement Dana (SEPERTI SEMULA) ---
+    sd_main = settle_df.copy()
+    sd_main[s_date_legacy] = sd_main[s_date_legacy].apply(_to_date)
+    sd_main = sd_main[~sd_main[s_date_legacy].isna()]
+    sd_main = sd_main[(sd_main[s_date_legacy] >= month_start) & (sd_main[s_date_legacy] <= month_end)]
+    sd_main[s_amt_legacy] = _to_num(sd_main[s_amt_legacy])
+    settle_by_date_total = sd_main.groupby(sd_main[s_date_legacy].dt.date, dropna=True)[s_amt_legacy].sum()
 
-    sd[s_amt_hdr] = _to_num(sd[s_amt_hdr])
+    # --- Settlement BCA / Non BCA (berdasar E,L,P) ---
+    sd_bca = settle_df.copy()
+    sd_bca[s_date_E] = sd_bca[s_date_E].apply(_to_date)
+    sd_bca = sd_bca[~sd_bca[s_date_E].isna()]
+    sd_bca = sd_bca[(sd_bca[s_date_E] >= month_start) & (sd_bca[s_date_E] <= month_end)]
+    sd_bca[s_amt_L] = _to_num(sd_bca[s_amt_L])
 
-    prod_norm = sd[s_prod_hdr].astype(str).str.strip().str.casefold()
+    prod_norm = sd_bca[s_prod_P].astype(str).str.strip().str.casefold()
     bca_mask  = (prod_norm == "bca va online".casefold())
 
-    # agregasi per-tanggal:
-    settle_by_date_total   = sd.groupby(sd[s_date_hdr].dt.date, dropna=True)[s_amt_hdr].sum()
-    settle_by_date_bca     = sd.loc[bca_mask].groupby(sd[s_date_hdr].dt.date, dropna=True)[s_amt_hdr].sum()
-    settle_by_date_non_bca = sd.loc[~bca_mask].groupby(sd[s_date_hdr].dt.date, dropna=True)[s_amt_hdr].sum()
+    settle_by_date_bca     = sd_bca.loc[bca_mask].groupby(sd_bca[s_date_E].dt.date, dropna=True)[s_amt_L].sum()
+    settle_by_date_non_bca = sd_bca.loc[~bca_mask].groupby(sd_bca[s_date_E].dt.date, dropna=True)[s_amt_L].sum()
 
     # --- Index tanggal (1..akhir bulan) ---
     idx = pd.Index(pd.date_range(month_start, month_end, freq="D").date, name="Tanggal")
     tiket_series   = tiket_by_date.reindex(idx, fill_value=0.0)
-    settle_series  = settle_by_date_total.reindex(idx, fill_value=0.0)
+    settle_series  = settle_by_date_total.reindex(idx, fill_value=0.0)     # ← kolom "Settlement Dana" (legacy)
     bca_series     = settle_by_date_bca.reindex(idx, fill_value=0.0)
     non_bca_series = settle_by_date_non_bca.reindex(idx, fill_value=0.0)
 
     # --- Final table ---
     final = pd.DataFrame(index=idx)
     final["Tiket Detail ESPAY"] = tiket_series.values
-    final["Settlement Dana"]    = settle_series.values
+    final["Settlement Dana"]    = settle_series.values      # tidak diubah-ubah (seperti semula)
     final["Selisih"]            = final["Tiket Detail ESPAY"] - final["Settlement Dana"]
-    final["Settlement BCA"]     = bca_series.values
-    final["Settlement Non BCA"] = non_bca_series.values
+    final["Settlement BCA"]     = bca_series.values         # dari E/L/P
+    final["Settlement Non BCA"] = non_bca_series.values     # dari E/L/P
 
     # View + total
     view = final.reset_index()
@@ -286,15 +299,16 @@ if go:
 
     # Format tampilan uang
     fmt = view_total.copy()
-    for c in ["Tiket Detail ESPAY", "Settlement Dana", "Selisih", "Settlement BCA", "Settlement Non BCA"]:
+    for c in ["Tiket Detail ESPAY","Settlement Dana","Selisih","Settlement BCA","Settlement Non BCA"]:
         fmt[c] = fmt[c].apply(_idr_fmt)
 
     st.subheader("Hasil Rekonsiliasi per Tanggal (mengikuti bulan parameter)")
     st.dataframe(fmt, use_container_width=True, hide_index=True)
 
-    # Debug info opsional
+    # Debug info (opsional)
     if show_debug:
-        st.caption(f"Settlement Date dipakai: **{s_date_hdr}** | Settlement Amount dipakai: **{s_amt_hdr}** | Product Name dipakai: **{s_prod_hdr}**")
+        st.caption(f"Settlement Dana pakai: Tgl=**{s_date_legacy}**, Amount=**{s_amt_legacy}** (legacy)")
+        st.caption(f"BCA/Non-BCA pakai: Tgl=**{s_date_E}** (E), Amount=**{s_amt_L}** (L), Product=**{s_prod_P}** (P)")
 
     # Export
     bio = io.BytesIO()
