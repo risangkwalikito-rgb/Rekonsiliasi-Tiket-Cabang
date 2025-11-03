@@ -1,4 +1,3 @@
-
 # app.py
 # -*- coding: utf-8 -*-
 """
@@ -70,10 +69,18 @@ def _to_num(sr: pd.Series) -> pd.Series:
     return sr.apply(_parse_money).astype(float)
 
 
+# --- Improved date parser (prefer day-first; handle Excel serial & pola ambigu) ---
+_ddmmyyyy = re.compile(r"\b(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{2,4})\b")
+
 def _to_date(val) -> Optional[pd.Timestamp]:
-    """Parse string/datetime + Excel serial (days since 1899-12-30)."""
+    """
+    Parse string/datetime + Excel serial (days since 1899-12-30).
+    Prefer day-first to menghindari 06/09/2025 → 2025-06-09.
+    """
     if pd.isna(val):
         return None
+
+    # Excel serial
     if isinstance(val, (int, float, np.number)):
         if not np.isfinite(val):
             return None
@@ -83,11 +90,31 @@ def _to_date(val) -> Optional[pd.Timestamp]:
                 return (base + pd.to_timedelta(float(val), unit="D")).normalize()
             except Exception:
                 pass
+
+    # Pandas/NumPy timestamp
     if isinstance(val, (pd.Timestamp, np.datetime64)):
-        return pd.to_datetime(val).normalize()
+        try:
+            return pd.to_datetime(val).normalize()
+        except Exception:
+            return None
+
+    # String parsing
     s = str(val).strip()
     if not s:
         return None
+
+    # Jika cocok pola dd/mm/yyyy atau dd-mm-yyyy → paksa day-first
+    m = _ddmmyyyy.search(s)
+    if m:
+        d, M, y = m.groups()
+        if len(y) == 2:
+            y = "20" + y  # asumsi abad ini
+        try:
+            return pd.Timestamp(year=int(y), month=int(M), day=int(d))
+        except Exception:
+            pass
+
+    # Fallback: coba dayfirst dulu, lalu month-first
     for dayfirst in (True, False):
         try:
             d = dtparser.parse(s, dayfirst=dayfirst, fuzzy=True)
@@ -130,10 +157,12 @@ def _find_col(df: pd.DataFrame, names: List[str]) -> Optional[str]:
     if df.empty:
         return None
     cols = [c for c in df.columns if isinstance(c, str)]
-    m = {c.lower().strip(): c for c in cols}
+    # normalisasi ringan
+    m = {c.lower().strip().lstrip("\ufeff"): c for c in cols}
     for n in names:
-        if n.lower().strip() in m:
-            return m[n.lower().strip()]
+        key = n.lower().strip()
+        if key in m:
+            return m[key]
     for n in names:
         key = n.lower().strip()
         for c in cols:
@@ -157,6 +186,8 @@ def _concat_files(files) -> pd.DataFrame:
     for f in files:
         df = _read_any(f)
         if not df.empty:
+            # rapikan nama kolom
+            df.columns = [str(c).strip().lstrip("\ufeff") for c in df.columns]
             df["__source__"] = f.name  # debug
             frames.append(df)
     return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
@@ -251,10 +282,9 @@ if go:
     td[t_date] = td[t_date].apply(_to_date)
     td = td[~td[t_date].isna()]
 
+    # filter status bayar & bank mengandung 'espay'
     td_stat_norm = td[t_stat].astype(str).str.strip().str.lower()
     td_bank_norm = td[t_bank].astype(str).str.strip().str.lower()
-
-    # filter lebih longgar: status bayar & bank mengandung 'espay'
     paid_mask  = td_stat_norm.str.contains(r"\bpaid\b|\bsuccess\b|sukses|settled|lunas", na=False)
     espay_mask = td_bank_norm.str.contains("espay", na=False)
     td = td[paid_mask & espay_mask]
@@ -262,23 +292,35 @@ if go:
     # batasi ke bulan parameter
     td = td[(td[t_date] >= month_start) & (td[t_date] <= month_end)]
 
+    # parse nominal
     td[t_amt] = _to_num(td[t_amt])
 
     # agregasi per tanggal (tanggal murni)
-    tiket_by_date = td.groupby(td[t_date].dt.date)[t_amt].sum()
-
-    if show_debug:
-        st.info(f"Tiket after filter: {len(td)} rows | paid_mask={paid_mask.sum()} espay_mask={espay_mask.sum()}")
+    tiket_by_date = td.groupby(td[t_date].dt.date, dropna=True)[t_amt].sum()
 
     # --- Settlement Dana ---
     sd = settle_df.copy()
     sd[s_date] = sd[s_date].apply(_to_date)
     sd = sd[~sd[s_date].isna()]
     sd = sd[(sd[s_date] >= month_start) & (sd[s_date] <= month_end)]
-    if show_debug:
-        st.info(f"Contoh Settlement Amount (raw → parsed): {sd[s_amt].head(3).tolist()} → {_to_num(sd[s_amt].head(3)).tolist()}")
     sd[s_amt] = _to_num(sd[s_amt])
-    settle_by_date = sd.groupby(sd[s_date].dt.date)[s_amt].sum()
+    settle_by_date = sd.groupby(sd[s_date].dt.date, dropna=True)[s_amt].sum()
+
+    # --- Debug distribusi bulan (mendeteksi salah-parse 06/09 → Juni) ---
+    if show_debug:
+        if not tiket_df.empty:
+            st.info("Distribusi bulan Tiket Detail (sebelum filter bank/status):")
+            td_dbg = tiket_df.copy()
+            td_dbg[t_date] = td_dbg[t_date].apply(_to_date)
+            td_dbg = td_dbg[~td_dbg[t_date].isna()]
+            st.write(td_dbg[t_date].dt.to_period('M').value_counts().sort_index())
+        if not settle_df.empty:
+            st.info("Distribusi bulan Settlement Dana:")
+            sd_dbg = settle_df.copy()
+            sd_dbg[s_date] = sd_dbg[s_date].apply(_to_date)
+            sd_dbg = sd_dbg[~sd_dbg[s_date].isna()]
+            st.write(sd_dbg[s_date].dt.to_period('M').value_counts().sort_index())
+        st.info(f"Tiket after filter: {len(td)} rows | paid_mask={paid_mask.sum()} espay_mask={espay_mask.sum()}")
 
     # --- Index tanggal dari parameter (1..akhir bulan) ---
     idx = pd.Index(pd.date_range(month_start, month_end, freq="D").date, name="Tanggal")
