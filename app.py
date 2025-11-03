@@ -171,7 +171,6 @@ with st.sidebar:
     st.header("3) Opsi")
     show_preview = st.checkbox("Tampilkan pratinjau", value=False)
     show_debug   = st.checkbox("Debug parsing", value=False)
-    show_settle_components = st.checkbox("Debug komponen settlement (gross/net/fee)", value=False)
     go = st.button("Proses", type="primary", use_container_width=True)
 
 tiket_df  = _concat_files(tiket_files)
@@ -185,33 +184,32 @@ if show_preview:
         st.markdown(f"Settlement Dana (rows: {len(settle_df)})"); st.dataframe(settle_df.head(50), use_container_width=True)
 
 if go:
-    # --- Mapping kolom (prioritas Action/Action Date untuk tanggal tiket) ---
+    # --- Tiket (tanggal prioritas Action/Action Date) ---
     t_date = _find_col(tiket_df, [
-        "Action/Action Date", "Action Date", "Action", "Action date",  # PRIORITAS
-        "Paid Date", "Payment Date", "Tanggal Bayar", "Tanggal"        # fallback
+        "Action/Action Date", "Action Date", "Action", "Action date",
+        "Paid Date", "Payment Date", "Tanggal Bayar", "Tanggal"
     ])
     t_amt  = _find_col(tiket_df, ["tarif","amount","nominal","jumlah","total"])
     t_stat = _find_col(tiket_df, ["St Bayar","Status Bayar","status","status bayar"])
     t_bank = _find_col(tiket_df, ["Bank","Payment Channel","channel","payment method"])
 
-    # Settlement: tanggal wajib
+    # --- Settlement: tanggal + Settlement Amount (fallback ke kolom L/12) ---
     s_date = _find_col(settle_df, ["Transaction Date","Tanggal Transaksi","Tanggal"])
-    # Deteksi kolom Gross/Net/Fee
-    s_amt_gross = _find_col(settle_df, ["Gross Amount","Total Amount","Bruto","Amount Gross"])
-    s_amt_net   = _find_col(settle_df, ["Settlement Amount","Net Amount","Settlement Net","Amount","Nominal","Jumlah"])
-    s_fee       = _find_col(settle_df, ["Fee","Settlement Fee","Biaya","Charges","Admin Fee","MDR","MDRA"])
+    s_amt  = _find_col(settle_df, ["Settlement Amount","Amount","Nominal","Jumlah"])
+    if s_amt is None and not settle_df.empty and len(settle_df.columns) >= 12:
+        # fallback ke kolom ke-12 (Excel 'L')
+        s_amt = settle_df.columns[11]
 
-    # Validasi minimal kolom
     missing = []
-    if t_date is None: missing.append("Tiket Detail: Action/Action Date (atau Paid/Payment/Tanggal)")
-    if t_amt  is None: missing.append("Tiket Detail: tarif/amount")
-    if t_stat is None: missing.append("Tiket Detail: St Bayar/Status")
-    if t_bank is None: missing.append("Tiket Detail: Bank/Channel")
-
-    if s_date is None: missing.append("Settlement Dana: Transaction Date/Tanggal")
-    if (s_amt_gross is None) and (s_amt_net is None):
-        missing.append("Settlement Dana: salah satu dari Gross Amount atau Settlement/Net Amount")
-
+    for name, col, src in [
+        ("Action/Action Date", t_date, "Tiket Detail"),
+        ("tarif/amount", t_amt, "Tiket Detail"),
+        ("St Bayar/Status", t_stat, "Tiket Detail"),
+        ("Bank/Channel", t_bank, "Tiket Detail"),
+        ("Transaction Date", s_date, "Settlement Dana"),
+        ("Settlement Amount (atau kolom L)", s_amt, "Settlement Dana"),
+    ]:
+        if col is None: missing.append(f"{src}: {name}")
     if missing:
         st.error("Kolom wajib tidak ditemukan → " + "; ".join(missing))
         st.stop()
@@ -220,47 +218,27 @@ if go:
     td = tiket_df.copy()
     td[t_date] = td[t_date].apply(_to_date)
     td = td[~td[t_date].isna()]
-
     td_stat_norm = td[t_stat].astype(str).str.strip().str.lower()
     td_bank_norm = td[t_bank].astype(str).str.strip().str.lower()
     paid_mask  = td_stat_norm.str.contains(r"\bpaid\b|\bsuccess\b|sukses|settled|lunas", na=False)
     espay_mask = td_bank_norm.str.contains("espay", na=False)
     td = td[paid_mask & espay_mask]
-
     td = td[(td[t_date] >= month_start) & (td[t_date] <= month_end)]
     td[t_amt] = _to_num(td[t_amt])
     tiket_by_date = td.groupby(td[t_date].dt.date, dropna=True)[t_amt].sum()
 
-    # --- Settlement Dana ---
+    # --- Settlement Dana (hanya dari Settlement Amount / kolom L) ---
     sd = settle_df.copy()
     sd[s_date] = sd[s_date].apply(_to_date)
     sd = sd[~sd[s_date].isna()]
     sd = sd[(sd[s_date] >= month_start) & (sd[s_date] <= month_end)]
-
-    # Tentukan basis settlement:
-    # 1) Ada Gross? pakai Gross.
-    # 2) Jika tidak ada Gross, dan ada Net + (opsional) Fee: Gross ≈ Net + |Fee_negatif|.
-    if s_amt_gross is not None:
-        sd_amt_series = _to_num(sd[s_amt_gross])
-        settle_basis = "gross"
-    else:
-        net_series = _to_num(sd[s_amt_net]) if s_amt_net is not None else pd.Series(0.0, index=sd.index)
-        if s_fee is not None:
-            fee_series = _to_num(sd[s_fee])
-            # Jika fee negatif → tambahkan absolutnya; jika positif → tambahkan apa adanya
-            fee_adjust = fee_series.where(fee_series > 0, (-fee_series).abs())
-            sd_amt_series = net_series + fee_adjust
-            settle_basis = "net+fee"
-        else:
-            sd_amt_series = net_series
-            settle_basis = "net-only"
-
-    sd["__settle_amt__"] = sd_amt_series
-    settle_by_date = sd.groupby(sd[s_date].dt.date, dropna=True)["__settle_amt__"].sum()
+    sd[s_amt] = _to_num(sd[s_amt])
+    settle_by_date = sd.groupby(sd[s_date].dt.date, dropna=True)[s_amt].sum()
 
     # --- Debug ---
     if show_debug:
         st.caption(f"Kolom tanggal tiket terpakai: **{t_date}**")
+        st.caption(f"Kolom settlement terpakai: **{s_amt}**")
         if not tiket_df.empty:
             st.info("Distribusi bulan Tiket Detail (sebelum filter bank/status):")
             td_dbg = tiket_df.copy()
@@ -273,12 +251,6 @@ if go:
             sd_dbg[s_date] = sd_dbg[s_date].apply(_to_date)
             sd_dbg = sd_dbg[~sd_dbg[s_date].isna()]
             st.write(sd_dbg[s_date].dt.to_period('M').value_counts().sort_index())
-        st.info(f"Tiket after filter: {len(td)} rows | paid_mask={paid_mask.sum()} espay_mask={espay_mask.sum()}")
-
-    if show_debug and show_settle_components:
-        st.info(f"Basis settlement: **{settle_basis}**")
-        cols_to_show = [c for c in [s_date, s_amt_gross, s_amt_net, s_fee] if c is not None]
-        st.dataframe(sd[cols_to_show + ["__settle_amt__"]].head(10), use_container_width=True)
 
     # --- Index tanggal (1..akhir bulan) ---
     idx = pd.Index(pd.date_range(month_start, month_end, freq="D").date, name="Tanggal")
