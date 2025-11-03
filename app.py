@@ -448,9 +448,11 @@ if go:
     final["UANG MASUK NON BCA"]                = uang_masuk_non_ser.values
     final["TOTAL UANG MASUK"]                  = total_uang_masuk_ser.values
 
-    view = final.reset_index()
+    # -------- View + total (HILANGKAN kolom TANGGAL di kanan; kunci urutan) --------
+    view = final.reset_index()                     # kolom pertama = index bernama 'Tanggal'
+    idx_col_name = view.columns[0]
+    view = view.rename(columns={idx_col_name: "TANGGAL"})
     view.insert(0, "NO", range(1, len(view) + 1))
-    view = view.rename(columns={"index": "TANGGAL"})
 
     total_row = pd.DataFrame([{
         "NO": "",
@@ -465,7 +467,20 @@ if go:
         "UANG MASUK NON BCA": final["UANG MASUK NON BCA"].sum(),
         "TOTAL UANG MASUK": final["TOTAL UANG MASUK"].sum(),
     }])
+
     view_total = pd.concat([view, total_row], ignore_index=True)
+
+    # Buang kemungkinan kolom 'Tanggal' sisa, lalu kunci urutan kolom
+    if "Tanggal" in view_total.columns and "TANGGAL" in view_total.columns:
+        view_total = view_total.drop(columns=["Tanggal"])
+
+    ordered_cols = [
+        "NO", "TANGGAL",
+        "TIKET DETAIL ESPAY", "SETTLEMENT DANA ESPAY", "SELISIH TIKET DETAIL - SETTLEMENT",
+        "SETTLEMENT BCA", "SETTLEMENT NON BCA", "TOTAL SETTLEMENT",
+        "UANG MASUK BCA", "UANG MASUK NON BCA", "TOTAL UANG MASUK",
+    ]
+    view_total = view_total.loc[:, ordered_cols]
 
     # Tabel tampilan (format Rupiah)
     fmt = view_total.copy()
