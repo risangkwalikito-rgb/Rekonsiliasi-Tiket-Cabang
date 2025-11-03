@@ -10,6 +10,7 @@ Rekonsiliasi: Tiket Detail vs Settlement Dana
 - Tambahan kolom:
     * Settlement BCA:    Amount=L, tanggal=Settlement Date(E), Product Name(P) == "BCA VA Online"
     * Settlement Non BCA:Amount=L, tanggal=Settlement Date(E), Product Name(P) != "BCA VA Online"
+    * Total Settlement:  Settlement BCA + Settlement Non BCA
 """
 
 from __future__ import annotations
@@ -111,7 +112,7 @@ def _read_any(uploaded_file) -> pd.DataFrame:
 
 def _find_col(df: pd.DataFrame, names: List[str]) -> Optional[str]:
     if df.empty: return None
-    cols = [c for c in df.columns if isinstance(c, str)]
+    cols = [c for c in df.columns jika isinstance(c, str)]
     m = {c.lower().strip().lstrip("\ufeff"): c for c in cols}
     for n in names:
         key = n.lower().strip()
@@ -199,9 +200,7 @@ if go:
     s_amt_legacy  = _find_col(settle_df, ["Settlement Amount","Amount","Nominal","Jumlah"])
     if s_amt_legacy is None and not settle_df.empty and len(settle_df.columns) >= 12:
         s_amt_legacy = settle_df.columns[11]  # fallback kolom L
-    # fallback tanggal jika Transaction Date tidak ada
     if s_date_legacy is None:
-        # tetap ada fallback agar tidak putus kerja (boleh pakai Settlement Date/E)
         s_date_legacy = _find_col(settle_df, ["Settlement Date","Tanggal Settlement","Settle Date","Tanggal"])
         if s_date_legacy is None and not settle_df.empty and len(settle_df.columns) >= 5:
             s_date_legacy = settle_df.columns[4]  # fallback kolom E
@@ -272,17 +271,19 @@ if go:
     # --- Index tanggal (1..akhir bulan) ---
     idx = pd.Index(pd.date_range(month_start, month_end, freq="D").date, name="Tanggal")
     tiket_series   = tiket_by_date.reindex(idx, fill_value=0.0)
-    settle_series  = settle_by_date_total.reindex(idx, fill_value=0.0)     # ← kolom "Settlement Dana" (legacy)
+    settle_series  = settle_by_date_total.reindex(idx, fill_value=0.0)     # Settlement Dana (legacy)
     bca_series     = settle_by_date_bca.reindex(idx, fill_value=0.0)
     non_bca_series = settle_by_date_non_bca.reindex(idx, fill_value=0.0)
+    total_settle_series = bca_series + non_bca_series                      # ← kolom baru
 
     # --- Final table ---
     final = pd.DataFrame(index=idx)
     final["Tiket Detail ESPAY"] = tiket_series.values
-    final["Settlement Dana"]    = settle_series.values      # tidak diubah-ubah (seperti semula)
+    final["Settlement Dana"]    = settle_series.values
     final["Selisih"]            = final["Tiket Detail ESPAY"] - final["Settlement Dana"]
-    final["Settlement BCA"]     = bca_series.values         # dari E/L/P
-    final["Settlement Non BCA"] = non_bca_series.values     # dari E/L/P
+    final["Settlement BCA"]     = bca_series.values
+    final["Settlement Non BCA"] = non_bca_series.values
+    final["Total Settlement"]   = total_settle_series.values               # ← kolom baru
 
     # View + total
     view = final.reset_index()
@@ -294,12 +295,13 @@ if go:
         "Selisih":            final["Selisih"].sum(),
         "Settlement BCA":     final["Settlement BCA"].sum(),
         "Settlement Non BCA": final["Settlement Non BCA"].sum(),
+        "Total Settlement":   final["Total Settlement"].sum(),             # ← total baru
     }])
     view_total = pd.concat([view, total_row], ignore_index=True)
 
     # Format tampilan uang
     fmt = view_total.copy()
-    for c in ["Tiket Detail ESPAY","Settlement Dana","Selisih","Settlement BCA","Settlement Non BCA"]:
+    for c in ["Tiket Detail ESPAY","Settlement Dana","Selisih","Settlement BCA","Settlement Non BCA","Total Settlement"]:
         fmt[c] = fmt[c].apply(_idr_fmt)
 
     st.subheader("Hasil Rekonsiliasi per Tanggal (mengikuti bulan parameter)")
