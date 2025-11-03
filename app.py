@@ -6,6 +6,7 @@ Rekonsiliasi: Tiket Detail vs Settlement Dana
 - Multi-file upload (Tiket Excel; Settlement CSV/Excel)
 - Parser uang/tanggal robust (format Eropa & serial Excel)
 - Tiket difilter: St Bayar mengandung 'paid/success/sukses/settled/lunas' & Bank mengandung 'ESPAY'
+
 - Settlement Dana: KEMBALI seperti semula (Transaction Date + Settlement Amount/L)
 - Tambahan kolom:
     * Settlement BCA:    Amount=L, tanggal=Settlement Date(E), Product Name(P) == "BCA VA Online"
@@ -19,6 +20,7 @@ import io
 import re
 import calendar
 from typing import Optional, List, Tuple
+
 import numpy as np
 import pandas as pd
 import streamlit as st
@@ -60,12 +62,15 @@ def _parse_money(val) -> float:
 def _to_num(sr: pd.Series) -> pd.Series:
     return sr.apply(_parse_money).astype(float)
 
+# --- Date parser (day-first + Excel serial) ---
 _ddmmyyyy = re.compile(r"\b(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{2,4})\b")
+
 def _to_date(val) -> Optional[pd.Timestamp]:
     if pd.isna(val):
         return None
     if isinstance(val, (int, float, np.number)):
-        if not np.isfinite(val): return None
+        if not np.isfinite(val):
+            return None
         if 1 <= float(val) <= 100000:
             try:
                 base = pd.Timestamp("1899-12-30")
@@ -73,16 +78,22 @@ def _to_date(val) -> Optional[pd.Timestamp]:
             except Exception:
                 pass
     if isinstance(val, (pd.Timestamp, np.datetime64)):
-        try: return pd.to_datetime(val).normalize()
-        except Exception: return None
+        try:
+            return pd.to_datetime(val).normalize()
+        except Exception:
+            return None
     s = str(val).strip()
-    if not s: return None
+    if not s:
+        return None
     m = _ddmmyyyy.search(s)
     if m:
         d, M, y = m.groups()
-        if len(y) == 2: y = "20" + y
-        try: return pd.Timestamp(year=int(y), month=int(M), day=int(d))
-        except Exception: pass
+        if len(y) == 2:
+            y = "20" + y
+        try:
+            return pd.Timestamp(year=int(y), month=int(M), day=int(d))
+        except Exception:
+            pass
     for dayfirst in (True, False):
         try:
             d = dtparser.parse(s, dayfirst=dayfirst, fuzzy=True)
@@ -92,11 +103,12 @@ def _to_date(val) -> Optional[pd.Timestamp]:
     return None
 
 def _read_any(uploaded_file) -> pd.DataFrame:
-    if not uploaded_file: return pd.DataFrame()
+    if not uploaded_file:
+        return pd.DataFrame()
     name = uploaded_file.name.lower()
     try:
         if name.endswith(".csv"):
-            for enc in ("utf-8-sig","utf-8","cp1252","iso-8859-1"):
+            for enc in ("utf-8-sig", "utf-8", "cp1252", "iso-8859-1"):
                 try:
                     uploaded_file.seek(0)
                     return pd.read_csv(uploaded_file, encoding=enc, sep=None, engine="python", dtype=str, na_filter=False)
@@ -111,26 +123,31 @@ def _read_any(uploaded_file) -> pd.DataFrame:
         return pd.DataFrame()
 
 def _find_col(df: pd.DataFrame, names: List[str]) -> Optional[str]:
-    if df.empty: return None
-    cols = [c for c in df.columns jika isinstance(c, str)]
+    if df.empty:
+        return None
+    cols = [c for c in df.columns if isinstance(c, str)]
     m = {c.lower().strip().lstrip("\ufeff"): c for c in cols}
     for n in names:
         key = n.lower().strip()
-        if key in m: return m[key]
+        if key in m:
+            return m[key]
     for n in names:
         key = n.lower().strip()
         for c in cols:
-            if key in c.lower(): return c
+            if key in c.lower():
+                return c
     return None
 
 def _idr_fmt(n: float) -> str:
-    if pd.isna(n): return "-"
+    if pd.isna(n):
+        return "-"
     neg = n < 0
     s = f"{abs(int(round(n))):,}".replace(",", ".")
     return f"({s})" if neg else s
 
 def _concat_files(files) -> pd.DataFrame:
-    if not files: return pd.DataFrame()
+    if not files:
+        return pd.DataFrame()
     frames = []
     for f in files:
         df = _read_any(f)
@@ -148,7 +165,8 @@ def _month_selector() -> Tuple[int, int]:
               ("05","Mei"),("06","Juni"),("07","Juli"),("08","Agustus"),
               ("09","September"),("10","Oktober"),("11","November"),("12","Desember")]
     col1, col2 = st.columns(2)
-    with col1: year = st.selectbox("Tahun", years, index=years.index(today.year))
+    with col1:
+        year = st.selectbox("Tahun", years, index=years.index(today.year))
     with col2:
         month_label = st.selectbox("Bulan", months, index=int(today.strftime("%m"))-1, format_func=lambda x: x[1])
         month = int(month_label[0])
@@ -229,7 +247,8 @@ if go:
         ("Settlement Amount/L", s_amt_L, "BCA/Non-BCA"),
         ("Product Name/P", s_prod_P, "BCA/Non-BCA"),
     ]:
-        if col is None: missing.append(f"{src}: {name}")
+        if col is None:
+            missing.append(f"{src}: {name}")
     if missing:
         st.error("Kolom wajib tidak ditemukan → " + "; ".join(missing))
         st.stop()
@@ -274,7 +293,7 @@ if go:
     settle_series  = settle_by_date_total.reindex(idx, fill_value=0.0)     # Settlement Dana (legacy)
     bca_series     = settle_by_date_bca.reindex(idx, fill_value=0.0)
     non_bca_series = settle_by_date_non_bca.reindex(idx, fill_value=0.0)
-    total_settle_series = bca_series + non_bca_series                      # ← kolom baru
+    total_settle_series = bca_series + non_bca_series                      # kolom baru
 
     # --- Final table ---
     final = pd.DataFrame(index=idx)
@@ -283,7 +302,7 @@ if go:
     final["Selisih"]            = final["Tiket Detail ESPAY"] - final["Settlement Dana"]
     final["Settlement BCA"]     = bca_series.values
     final["Settlement Non BCA"] = non_bca_series.values
-    final["Total Settlement"]   = total_settle_series.values               # ← kolom baru
+    final["Total Settlement"]   = total_settle_series.values
 
     # View + total
     view = final.reset_index()
@@ -295,7 +314,7 @@ if go:
         "Selisih":            final["Selisih"].sum(),
         "Settlement BCA":     final["Settlement BCA"].sum(),
         "Settlement Non BCA": final["Settlement Non BCA"].sum(),
-        "Total Settlement":   final["Total Settlement"].sum(),             # ← total baru
+        "Total Settlement":   final["Total Settlement"].sum(),
     }])
     view_total = pd.concat([view, total_row], ignore_index=True)
 
