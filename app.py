@@ -3,7 +3,11 @@
 """
 Rekonsiliasi: Tiket Detail vs Settlement Dana
 - Parameter tanggal = Bulan & Tahun; hasil selalu 1..akhir bulan itu
-- Multi-file upload (Tiket Excel; Settlement CSV/Excel; Rekening Koran BCA & Non BCA)
+- Multi-file upload:
+    * Tiket Detail (Excel .xls/.xlsx)
+    * Settlement Dana (CSV/Excel)
+    * Rekening Koran BCA (CSV/Excel)
+    * Rekening Koran Non BCA (CSV/Excel)
 - Parser uang/tanggal robust (format Eropa & serial Excel)
 - Tiket difilter: St Bayar mengandung 'paid/success/sukses/settled/lunas' & Bank mengandung 'ESPAY'
 
@@ -13,7 +17,7 @@ Rekonsiliasi: Tiket Detail vs Settlement Dana
     * Settlement Non BCA:    Amount=L, tanggal=Settlement Date(E), Product Name(P) != "BCA VA Online"
     * Total Settlement:      Settlement BCA + Settlement Non BCA
     * Uang Masuk BCA:        RK BCA -> amount=mutasi, date=Tanggal, filter Keterangan contains "mrc"
-    * Uang Masuk Non BCA:    RK Non BCA -> **header diabaikan (promote baris 13/14)**,
+    * Uang Masuk Non BCA:    RK Non BCA -> header dipromote (baris 13/14),
                               amount=credit, date=Date, filter Remark contains "mrc"
 """
 
@@ -106,23 +110,64 @@ def _to_date(val) -> Optional[pd.Timestamp]:
     return None
 
 def _read_any(uploaded_file) -> pd.DataFrame:
+    """Baca CSV/Excel. Dukung .xls (xlrd), .xlsx/.xlsm (openpyxl). Tahan kasus salah-rename."""
     if not uploaded_file:
         return pd.DataFrame()
     name = uploaded_file.name.lower()
+
     try:
+        # ---- CSV ----
         if name.endswith(".csv"):
             for enc in ("utf-8-sig", "utf-8", "cp1252", "iso-8859-1"):
                 try:
                     uploaded_file.seek(0)
                     return pd.read_csv(
-                        uploaded_file, encoding=enc, sep=None, engine="python", dtype=str, na_filter=False
+                        uploaded_file,
+                        encoding=enc,
+                        sep=None,
+                        engine="python",
+                        dtype=str,
+                        na_filter=False,
                     )
                 except Exception:
                     continue
             st.error(f"CSV gagal dibaca: {uploaded_file.name}. Simpan ulang sebagai UTF-8.")
             return pd.DataFrame()
-        else:
+
+        # ---- Excel modern (.xlsx/.xlsm) ----
+        elif name.endswith((".xlsx", ".xlsm", ".xltx", ".xltm")):
+            uploaded_file.seek(0)
             return pd.read_excel(uploaded_file, engine="openpyxl")
+
+        # ---- Excel lama (.xls) ----
+        elif name.endswith(".xls"):
+            # 1) Coba xlrd (format .xls klasik)
+            try:
+                uploaded_file.seek(0)
+                return pd.read_excel(uploaded_file, engine="xlrd")
+            except Exception:
+                # 2) Bisa jadi sebenarnya file .xlsx yang salah ekstensi → coba openpyxl
+                try:
+                    uploaded_file.seek(0)
+                    return pd.read_excel(uploaded_file, engine="openpyxl")
+                except Exception:
+                    st.error(
+                        "Gagal membaca file .xls. Format .xls membutuhkan paket 'xlrd' (versi 1.2.x). "
+                        "Solusi cepat: buka file di Excel lalu 'Save As' ke .xlsx, kemudian unggah ulang."
+                    )
+                    return pd.DataFrame()
+
+        # ---- Fallback generik ----
+        else:
+            uploaded_file.seek(0)
+            return pd.read_excel(uploaded_file)  # biarkan pandas memilih engine
+
+    except ImportError:
+        st.error(
+            "Dukungan .xls membutuhkan paket 'xlrd' (versi 1.2.x). "
+            "Silakan simpan ulang file sebagai .xlsx atau pasang xlrd<2.0."
+        )
+        return pd.DataFrame()
     except Exception as e:
         st.error(f"Gagal membaca {uploaded_file.name}: {e}")
         return pd.DataFrame()
@@ -173,8 +218,7 @@ def _promote_header(df: pd.DataFrame) -> pd.DataFrame:
         keys = ["date", "tanggal", "transaction date", "tgl",
                 "remark", "keterangan", "description", "deskripsi",
                 "credit", "kredit", "cr", "amount", "jumlah"]
-        # anggap header jika minimal 2 kolom 'bernuansa header'
-        score = sum(any(k in v for k in keys) for v in vals)
+        score = sum(any(k in v for k in keys) for v in vals)  # minimal 2 sinyal header
         return score >= 2
 
     # Coba baris 13 (index 12) lalu 14 (index 13)
@@ -258,7 +302,7 @@ with st.sidebar:
 tiket_df   = _concat_files(tiket_files)
 settle_df  = _concat_files(settle_files)
 rk_bca_df  = _concat_files(rk_bca_files)
-rk_non_df  = _concat_rk_non(rk_non_files)   # <— PENTING: gunakan pembaca khusus untuk NON BCA
+rk_non_df  = _concat_rk_non(rk_non_files)   # gunakan pembaca khusus untuk NON BCA
 
 if show_preview:
     st.subheader("Pratinjau")
