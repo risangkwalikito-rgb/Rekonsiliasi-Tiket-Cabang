@@ -19,6 +19,7 @@ Rekonsiliasi: Tiket Detail vs Settlement Dana
     * Uang Masuk BCA:        RK BCA -> amount=mutasi, date=Tanggal, filter Keterangan contains "mrc"
     * Uang Masuk Non BCA:    RK Non BCA -> header dipromote (baris 13/14),
                               amount=credit, date=Date, filter Remark contains "mrc"
+    * Total Uang Masuk:      Uang Masuk BCA + Uang Masuk Non BCA
 """
 
 from __future__ import annotations
@@ -117,7 +118,7 @@ def _read_any(uploaded_file) -> pd.DataFrame:
     name = uploaded_file.name.lower()
 
     try:
-        # ---- CSV ---- (tetap teks supaya aman delimiter/angka)
+        # ---- CSV ----
         if name.endswith(".csv"):
             for enc in ("utf-8-sig", "utf-8", "cp1252", "iso-8859-1"):
                 try:
@@ -135,24 +136,24 @@ def _read_any(uploaded_file) -> pd.DataFrame:
             st.error(f"CSV gagal dibaca: {uploaded_file.name}. Simpan ulang sebagai UTF-8.")
             return pd.DataFrame()
 
-        # ---- Excel modern (.xlsx/.xlsm) ---- (biarkan pandas infer dtype)
+        # ---- Excel modern (.xlsx/.xlsm) ----
         elif name.endswith((".xlsx", ".xlsm", ".xltx", ".xltm")):
             uploaded_file.seek(0)
             return pd.read_excel(uploaded_file, engine="openpyxl")
 
         # ---- Excel lama (.xls) ----
         elif name.endswith(".xls"):
-            # 1) xlrd (biarkan pandas infer dtype)
+            # 1) xlrd
             try:
                 uploaded_file.seek(0)
                 return pd.read_excel(uploaded_file, engine="xlrd")
             except Exception:
                 pass
-            # 2) pyexcel-xls (fallback)
+            # 2) pyexcel-xls
             try:
                 uploaded_file.seek(0)
                 raw = uploaded_file.read()
-                from pyexcel_xls import get_data  # pastikan sudah di requirements
+                from pyexcel_xls import get_data
                 book = get_data(io.BytesIO(raw))
                 for _sh, rows in book.items():
                     if not rows:
@@ -163,7 +164,7 @@ def _read_any(uploaded_file) -> pd.DataFrame:
                     return df
             except Exception:
                 pass
-            # 3) Coba openpyxl (kalau sebetulnya .xlsx tapi berekstensi .xls)
+            # 3) openpyxl (kalau salah ekstensi)
             try:
                 uploaded_file.seek(0)
                 return pd.read_excel(uploaded_file, engine="openpyxl")
@@ -432,7 +433,6 @@ if go:
             uang_masuk_bca = bca.groupby(bca[rk_tgl_bca].dt.date, dropna=True)[rk_amt_bca].sum()
 
     # --- Rekening Koran: Uang Masuk NON BCA (credit/Date/Remark contains 'mrc') ---
-    # (hanya bagian ini yang “baru”; lainnya dikembalikan seperti semula)
     uang_masuk_non = pd.Series(dtype=float)
     if not rk_non_df.empty:
         rk_tgl_non  = _find_col(rk_non_df, ["Date","Tanggal","Transaction Date","Tgl"])
@@ -451,13 +451,14 @@ if go:
 
     # --- Index tanggal (1..akhir bulan) ---
     idx = pd.Index(pd.date_range(month_start, month_end, freq="D").date, name="Tanggal")
-    tiket_series      = tiket_by_date.reindex(idx, fill_value=0.0)
-    settle_series     = settle_by_date_total.reindex(idx, fill_value=0.0)         # Settlement Dana (legacy)
-    bca_series        = bca_series.reindex(idx, fill_value=0.0)
-    non_bca_series    = non_bca_series.reindex(idx, fill_value=0.0)
-    total_settle_ser  = (bca_series + non_bca_series).reindex(idx, fill_value=0.0)
+    tiket_series        = tiket_by_date.reindex(idx, fill_value=0.0)
+    settle_series       = settle_by_date_total.reindex(idx, fill_value=0.0)         # Settlement Dana (legacy)
+    bca_series          = bca_series.reindex(idx, fill_value=0.0)
+    non_bca_series      = non_bca_series.reindex(idx, fill_value=0.0)
+    total_settle_ser    = (bca_series + non_bca_series).reindex(idx, fill_value=0.0)
     uang_masuk_bca_ser  = uang_masuk_bca.reindex(idx, fill_value=0.0)
     uang_masuk_non_ser  = uang_masuk_non.reindex(idx, fill_value=0.0)
+    total_uang_masuk_ser = (uang_masuk_bca_ser + uang_masuk_non_ser).reindex(idx, fill_value=0.0)  # <— BARU
 
     # --- Final table ---
     final = pd.DataFrame(index=idx)
@@ -469,6 +470,7 @@ if go:
     final["Total Settlement"]   = total_settle_ser.values
     final["Uang Masuk BCA"]     = uang_masuk_bca_ser.values
     final["Uang Masuk Non BCA"] = uang_masuk_non_ser.values
+    final["Total Uang Masuk"]   = total_uang_masuk_ser.values  # <— BARU (diletakkan setelah Non BCA)
 
     # View + total
     view = final.reset_index()
@@ -483,6 +485,7 @@ if go:
         "Total Settlement":   final["Total Settlement"].sum(),
         "Uang Masuk BCA":     final["Uang Masuk BCA"].sum(),
         "Uang Masuk Non BCA": final["Uang Masuk Non BCA"].sum(),
+        "Total Uang Masuk":   final["Total Uang Masuk"].sum(),  # <— BARU
     }])
     view_total = pd.concat([view, total_row], ignore_index=True)
 
@@ -491,7 +494,7 @@ if go:
     for c in [
         "Tiket Detail ESPAY","Settlement Dana","Selisih",
         "Settlement BCA","Settlement Non BCA","Total Settlement",
-        "Uang Masuk BCA","Uang Masuk Non BCA"
+        "Uang Masuk BCA","Uang Masuk Non BCA","Total Uang Masuk"  # <— BARU
     ]:
         fmt[c] = fmt[c].apply(_idr_fmt)
 
