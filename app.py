@@ -110,7 +110,7 @@ def _to_date(val) -> Optional[pd.Timestamp]:
     return None
 
 def _read_any(uploaded_file) -> pd.DataFrame:
-    """Baca CSV/Excel. Dukung .xls (xlrd), .xlsx/.xlsm (openpyxl). Tahan kasus salah-rename."""
+    """Baca CSV/Excel. .xls → xlrd; fallback pyexcel-xls; terakhir coba openpyxl kalau salah ekstensi."""
     if not uploaded_file:
         return pd.DataFrame()
     name = uploaded_file.name.lower()
@@ -137,35 +137,52 @@ def _read_any(uploaded_file) -> pd.DataFrame:
         # ---- Excel modern (.xlsx/.xlsm) ----
         elif name.endswith((".xlsx", ".xlsm", ".xltx", ".xltm")):
             uploaded_file.seek(0)
-            return pd.read_excel(uploaded_file, engine="openpyxl")
+            return pd.read_excel(uploaded_file, engine="openpyxl", dtype=str)
 
         # ---- Excel lama (.xls) ----
         elif name.endswith(".xls"):
             # 1) Coba xlrd (format .xls klasik)
             try:
                 uploaded_file.seek(0)
-                return pd.read_excel(uploaded_file, engine="xlrd")
+                return pd.read_excel(uploaded_file, engine="xlrd", dtype=str)
             except Exception:
-                # 2) Bisa jadi sebenarnya file .xlsx yang salah ekstensi → coba openpyxl
-                try:
-                    uploaded_file.seek(0)
-                    return pd.read_excel(uploaded_file, engine="openpyxl")
-                except Exception:
-                    st.error(
-                        "Gagal membaca file .xls. Format .xls membutuhkan paket 'xlrd' (versi 1.2.x). "
-                        "Solusi cepat: buka file di Excel lalu 'Save As' ke .xlsx, kemudian unggah ulang."
-                    )
-                    return pd.DataFrame()
+                pass
+            # 2) Fallback: pyexcel-xls
+            try:
+                uploaded_file.seek(0)
+                raw = uploaded_file.read()
+                from pyexcel_xls import get_data  # requires pyexcel-xls
+                book = get_data(io.BytesIO(raw))
+                # Ambil sheet pertama yang punya baris
+                for _sh, rows in book.items():
+                    if not rows:
+                        continue
+                    header = [str(x).strip() if x is not None else "" for x in rows[0]]
+                    body = rows[1:] if len(rows) > 1 else []
+                    df = pd.DataFrame(body, columns=header)
+                    return df.astype(str)
+            except Exception:
+                pass
+            # 3) Terakhir, coba openpyxl (kalau file sebenarnya .xlsx tapi rename .xls)
+            try:
+                uploaded_file.seek(0)
+                return pd.read_excel(uploaded_file, engine="openpyxl", dtype=str)
+            except Exception:
+                st.error(
+                    "Gagal membaca file .xls tanpa ubah format. "
+                    "Pasang salah satu dependensi: 'xlrd' atau 'pyexcel-xls' di environment aplikasi."
+                )
+                return pd.DataFrame()
 
         # ---- Fallback generik ----
         else:
             uploaded_file.seek(0)
-            return pd.read_excel(uploaded_file)  # biarkan pandas memilih engine
+            return pd.read_excel(uploaded_file, dtype=str)
 
     except ImportError:
         st.error(
-            "Dukungan .xls membutuhkan paket 'xlrd' (versi 1.2.x). "
-            "Silakan simpan ulang file sebagai .xlsx atau pasang xlrd<2.0."
+            "Dukungan .xls perlu paket 'xlrd' atau 'pyexcel-xls'. "
+            "Silakan tambahkan salah satunya di requirements.txt environment aplikasi."
         )
         return pd.DataFrame()
     except Exception as e:
@@ -218,10 +235,9 @@ def _promote_header(df: pd.DataFrame) -> pd.DataFrame:
         keys = ["date", "tanggal", "transaction date", "tgl",
                 "remark", "keterangan", "description", "deskripsi",
                 "credit", "kredit", "cr", "amount", "jumlah"]
-        score = sum(any(k in v for k in keys) for v in vals)  # minimal 2 sinyal header
+        score = sum(any(k in v for k in keys) for v in vals)
         return score >= 2
 
-    # Coba baris 13 (index 12) lalu 14 (index 13)
     for r in (12, 13):
         if r < len(df) and _is_header_row(df.iloc[r]):
             cols = [str(x).strip() for x in df.iloc[r].tolist()]
@@ -230,7 +246,6 @@ def _promote_header(df: pd.DataFrame) -> pd.DataFrame:
             out.columns = [str(c).strip().lstrip("\ufeff") for c in out.columns]
             return out
 
-    # Jika tidak, scan 0..49
     scan_max = min(50, len(df))
     for r in range(scan_max):
         if _is_header_row(df.iloc[r]):
@@ -331,7 +346,7 @@ if go:
     if s_amt_legacy is None and not settle_df.empty and len(settle_df.columns) >= 12:
         s_amt_legacy = settle_df.columns[11]  # fallback kolom L
     if s_date_legacy is None:
-        s_date_legacy = _find_col(settle_df, ["Settlement Date","Tanggal Settlement","Settle Date","Tanggal"])
+        s_date_legacy = _find_col(settle_df, ["Settlement Date","Tanggal Settlement","Setle Date","Tanggal"])
         if s_date_legacy is None and not settle_df.empty and len(settle_df.columns) >= 5:
             s_date_legacy = settle_df.columns[4]  # fallback kolom E
 
@@ -417,7 +432,6 @@ if go:
             uang_masuk_bca = bca.groupby(bca[rk_tgl_bca].dt.date, dropna=True)[rk_amt_bca].sum()
 
     # --- Rekening Koran: Uang Masuk NON BCA (credit/Date/Remark contains 'mrc') ---
-    # >>> Perbaikan utama: gunakan rk_non_df yang SUDAH dipromote header (baris 13/14) <<<
     uang_masuk_non = pd.Series(dtype=float)
     if not rk_non_df.empty:
         rk_tgl_non  = _find_col(rk_non_df, ["Date","Tanggal","Transaction Date","Tgl"])
