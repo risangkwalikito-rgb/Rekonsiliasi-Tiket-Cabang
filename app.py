@@ -110,13 +110,14 @@ def _to_date(val) -> Optional[pd.Timestamp]:
     return None
 
 def _read_any(uploaded_file) -> pd.DataFrame:
-    """Baca CSV/Excel. .xls → xlrd; fallback pyexcel-xls; terakhir coba openpyxl kalau salah ekstensi."""
+    """Baca CSV/Excel. Kembalikan perilaku default untuk Excel (tanpa memaksa dtype=str).
+       .xls → xlrd (tidak paksa dtype), fallback pyexcel-xls, terakhir coba openpyxl jika salah ekstensi."""
     if not uploaded_file:
         return pd.DataFrame()
     name = uploaded_file.name.lower()
 
     try:
-        # ---- CSV ----
+        # ---- CSV ---- (tetap teks supaya aman delimiter/angka)
         if name.endswith(".csv"):
             for enc in ("utf-8-sig", "utf-8", "cp1252", "iso-8859-1"):
                 try:
@@ -134,55 +135,54 @@ def _read_any(uploaded_file) -> pd.DataFrame:
             st.error(f"CSV gagal dibaca: {uploaded_file.name}. Simpan ulang sebagai UTF-8.")
             return pd.DataFrame()
 
-        # ---- Excel modern (.xlsx/.xlsm) ----
+        # ---- Excel modern (.xlsx/.xlsm) ---- (biarkan pandas infer dtype)
         elif name.endswith((".xlsx", ".xlsm", ".xltx", ".xltm")):
             uploaded_file.seek(0)
-            return pd.read_excel(uploaded_file, engine="openpyxl", dtype=str)
+            return pd.read_excel(uploaded_file, engine="openpyxl")
 
         # ---- Excel lama (.xls) ----
         elif name.endswith(".xls"):
-            # 1) Coba xlrd (format .xls klasik)
+            # 1) xlrd (biarkan pandas infer dtype)
             try:
                 uploaded_file.seek(0)
-                return pd.read_excel(uploaded_file, engine="xlrd", dtype=str)
+                return pd.read_excel(uploaded_file, engine="xlrd")
             except Exception:
                 pass
-            # 2) Fallback: pyexcel-xls
+            # 2) pyexcel-xls (fallback)
             try:
                 uploaded_file.seek(0)
                 raw = uploaded_file.read()
-                from pyexcel_xls import get_data  # requires pyexcel-xls
+                from pyexcel_xls import get_data  # pastikan sudah di requirements
                 book = get_data(io.BytesIO(raw))
-                # Ambil sheet pertama yang punya baris
                 for _sh, rows in book.items():
                     if not rows:
                         continue
                     header = [str(x).strip() if x is not None else "" for x in rows[0]]
                     body = rows[1:] if len(rows) > 1 else []
                     df = pd.DataFrame(body, columns=header)
-                    return df.astype(str)
+                    return df
             except Exception:
                 pass
-            # 3) Terakhir, coba openpyxl (kalau file sebenarnya .xlsx tapi rename .xls)
+            # 3) Coba openpyxl (kalau sebetulnya .xlsx tapi berekstensi .xls)
             try:
                 uploaded_file.seek(0)
-                return pd.read_excel(uploaded_file, engine="openpyxl", dtype=str)
+                return pd.read_excel(uploaded_file, engine="openpyxl")
             except Exception:
                 st.error(
                     "Gagal membaca file .xls tanpa ubah format. "
-                    "Pasang salah satu dependensi: 'xlrd' atau 'pyexcel-xls' di environment aplikasi."
+                    "Pastikan paket 'xlrd' (1.2.x) atau 'pyexcel-xls' terpasang di environment."
                 )
                 return pd.DataFrame()
 
         # ---- Fallback generik ----
         else:
             uploaded_file.seek(0)
-            return pd.read_excel(uploaded_file, dtype=str)
+            return pd.read_excel(uploaded_file)
 
     except ImportError:
         st.error(
             "Dukungan .xls perlu paket 'xlrd' atau 'pyexcel-xls'. "
-            "Silakan tambahkan salah satunya di requirements.txt environment aplikasi."
+            "Tambahkan salah satunya di requirements.txt."
         )
         return pd.DataFrame()
     except Exception as e:
@@ -317,7 +317,7 @@ with st.sidebar:
 tiket_df   = _concat_files(tiket_files)
 settle_df  = _concat_files(settle_files)
 rk_bca_df  = _concat_files(rk_bca_files)
-rk_non_df  = _concat_rk_non(rk_non_files)   # gunakan pembaca khusus untuk NON BCA
+rk_non_df  = _concat_rk_non(rk_non_files)   # KHUSUS Non BCA → promote header 13/14
 
 if show_preview:
     st.subheader("Pratinjau")
@@ -346,7 +346,7 @@ if go:
     if s_amt_legacy is None and not settle_df.empty and len(settle_df.columns) >= 12:
         s_amt_legacy = settle_df.columns[11]  # fallback kolom L
     if s_date_legacy is None:
-        s_date_legacy = _find_col(settle_df, ["Settlement Date","Tanggal Settlement","Setle Date","Tanggal"])
+        s_date_legacy = _find_col(settle_df, ["Settlement Date","Tanggal Settlement","Settle Date","Tanggal","Setle Date"])
         if s_date_legacy is None and not settle_df.empty and len(settle_df.columns) >= 5:
             s_date_legacy = settle_df.columns[4]  # fallback kolom E
 
@@ -432,6 +432,7 @@ if go:
             uang_masuk_bca = bca.groupby(bca[rk_tgl_bca].dt.date, dropna=True)[rk_amt_bca].sum()
 
     # --- Rekening Koran: Uang Masuk NON BCA (credit/Date/Remark contains 'mrc') ---
+    # (hanya bagian ini yang “baru”; lainnya dikembalikan seperti semula)
     uang_masuk_non = pd.Series(dtype=float)
     if not rk_non_df.empty:
         rk_tgl_non  = _find_col(rk_non_df, ["Date","Tanggal","Transaction Date","Tgl"])
