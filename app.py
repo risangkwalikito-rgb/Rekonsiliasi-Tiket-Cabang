@@ -6,7 +6,7 @@ Rekonsiliasi: Tiket Detail vs Settlement Dana
 - Multi-file upload (Tiket Excel; Settlement CSV/Excel)
 - Parser uang/tanggal robust (format Eropa & serial Excel)
 - Tiket difilter: St Bayar mengandung 'paid/success/sukses/settled/lunas' & Bank mengandung 'ESPAY'
-- Tambahan kolom: Settlement BCA (BCA VA Online) & Settlement Non BCA
+- Tambahan kolom: Settlement BCA (VA Number == "BCA VA Online") & Settlement Non BCA (selain itu)
 """
 
 from __future__ import annotations
@@ -194,12 +194,13 @@ if go:
     t_stat = _find_col(tiket_df, ["St Bayar","Status Bayar","status","status bayar"])
     t_bank = _find_col(tiket_df, ["Bank","Payment Channel","channel","payment method"])
 
-    # --- Settlement: tanggal + Settlement Amount (fallback ke kolom L/12) + Channel ---
-    s_date    = _find_col(settle_df, ["Transaction Date","Tanggal Transaksi","Tanggal"])
-    s_amt     = _find_col(settle_df, ["Settlement Amount","Amount","Nominal","Jumlah"])
-    s_channel = _find_col(settle_df, ["Bank","Channel","Payment Channel","Payment Method","Payment Channel Name"])
+    # --- Settlement: wajib pakai Settlement Amount + klasifikasi via VA Number ---
+    s_date = _find_col(settle_df, ["Transaction Date","Tanggal Transaksi","Tanggal"])
+    s_amt  = _find_col(settle_df, ["Settlement Amount","Amount","Nominal","Jumlah"])
+    # fallback ke kolom L (index 11) jika header amount tidak ada
     if s_amt is None and not settle_df.empty and len(settle_df.columns) >= 12:
-        s_amt = settle_df.columns[11]  # fallback ke kolom L
+        s_amt = settle_df.columns[11]
+    s_va   = _find_col(settle_df, ["VA Number"])  # sesuai permintaan, kolom ini wajib
 
     missing = []
     for name, col, src in [
@@ -209,7 +210,7 @@ if go:
         ("Bank/Channel", t_bank, "Tiket Detail"),
         ("Transaction Date", s_date, "Settlement Dana"),
         ("Settlement Amount (atau kolom L)", s_amt, "Settlement Dana"),
-        ("Channel/Bank", s_channel, "Settlement Dana"),
+        ("VA Number", s_va, "Settlement Dana"),
     ]:
         if col is None: missing.append(f"{src}: {name}")
     if missing:
@@ -220,27 +221,30 @@ if go:
     td = tiket_df.copy()
     td[t_date] = td[t_date].apply(_to_date)
     td = td[~td[t_date].isna()]
+
     td_stat_norm = td[t_stat].astype(str).str.strip().str.lower()
     td_bank_norm = td[t_bank].astype(str).str.strip().str.lower()
     paid_mask  = td_stat_norm.str.contains(r"\bpaid\b|\bsuccess\b|sukses|settled|lunas", na=False)
     espay_mask = td_bank_norm.str.contains("espay", na=False)
     td = td[paid_mask & espay_mask]
+
     td = td[(td[t_date] >= month_start) & (td[t_date] <= month_end)]
     td[t_amt] = _to_num(td[t_amt])
     tiket_by_date = td.groupby(td[t_date].dt.date, dropna=True)[t_amt].sum()
 
-    # --- Settlement Dana (total + BCA/Non-BCA) ---
+    # --- Settlement Dana (Total + BCA/Non-BCA dari Settlement Amount) ---
     sd = settle_df.copy()
     sd[s_date] = sd[s_date].apply(_to_date)
     sd = sd[~sd[s_date].isna()]
     sd = sd[(sd[s_date] >= month_start) & (sd[s_date] <= month_end)]
+
     sd[s_amt] = _to_num(sd[s_amt])
 
-    # normalisasi channel
-    ch_norm = sd[s_channel].astype(str).str.strip().str.lower()
-    bca_mask = ch_norm.str.contains(r"\bbca\s*va\s*online\b", na=False)
+    # klasifikasi berdasarkan VA Number
+    va_norm = sd[s_va].astype(str).str.strip().str.casefold()
+    bca_mask = (va_norm == "bca va online".casefold())
 
-    # agregasi
+    # agregasi berdasarkan tanggal
     settle_by_date_total   = sd.groupby(sd[s_date].dt.date, dropna=True)[s_amt].sum()
     settle_by_date_bca     = sd.loc[bca_mask].groupby(sd[s_date].dt.date, dropna=True)[s_amt].sum()
     settle_by_date_non_bca = sd.loc[~bca_mask].groupby(sd[s_date].dt.date, dropna=True)[s_amt].sum()
@@ -254,11 +258,11 @@ if go:
 
     # --- Final table ---
     final = pd.DataFrame(index=idx)
-    final["Tiket Detail ESPAY"]   = tiket_series.values
-    final["Settlement Dana"]      = settle_series.values
-    final["Selisih"]              = final["Tiket Detail ESPAY"] - final["Settlement Dana"]
-    final["Settlement BCA"]       = bca_series.values
-    final["Settlement Non BCA"]   = non_bca_series.values  # harusnya = Settlement Dana - Settlement BCA
+    final["Tiket Detail ESPAY"] = tiket_series.values
+    final["Settlement Dana"]    = settle_series.values
+    final["Selisih"]            = final["Tiket Detail ESPAY"] - final["Settlement Dana"]
+    final["Settlement BCA"]     = bca_series.values       # VA Number == "BCA VA Online"
+    final["Settlement Non BCA"] = non_bca_series.values   # selain "BCA VA Online"
 
     # View + total
     view = final.reset_index()
