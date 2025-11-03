@@ -9,11 +9,12 @@ Rekonsiliasi: Tiket Detail vs Settlement Dana
 
 - Settlement Dana: KEMBALI seperti semula (Transaction Date + Settlement Amount/L)
 - Tambahan kolom:
-    * Settlement BCA:    Amount=L, tanggal=Settlement Date(E), Product Name(P) == "BCA VA Online"
-    * Settlement Non BCA:Amount=L, tanggal=Settlement Date(E), Product Name(P) != "BCA VA Online"
-    * Total Settlement:  Settlement BCA + Settlement Non BCA
-    * Uang Masuk BCA:    dari Rekening Koran BCA -> amount=mutasi, date=Tanggal, filter Keterangan contains "mrc"
-    * Uang Masuk Non BCA:dari Rekening Koran Non BCA -> amount=credit, date=Date, filter Remark contains "mrc"
+    * Settlement BCA:        Amount=L, tanggal=Settlement Date(E), Product Name(P) == "BCA VA Online"
+    * Settlement Non BCA:    Amount=L, tanggal=Settlement Date(E), Product Name(P) != "BCA VA Online"
+    * Total Settlement:      Settlement BCA + Settlement Non BCA
+    * Uang Masuk BCA:        RK BCA -> amount=mutasi, date=Tanggal, filter Keterangan contains "mrc"
+    * Uang Masuk Non BCA:    RK Non BCA -> **header diabaikan (promote baris 13/14)**,
+                              amount=credit, date=Date, filter Remark contains "mrc"
 """
 
 from __future__ import annotations
@@ -161,6 +162,59 @@ def _concat_files(files) -> pd.DataFrame:
             frames.append(df)
     return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
 
+# ==== KHUSUS RK NON BCA: angkat baris 13/14 menjadi header bila perlu ====
+def _promote_header(df: pd.DataFrame) -> pd.DataFrame:
+    """Coba jadikan baris 13/14 sebagai header; jika gagal, cari baris header terbaik dalam 50 baris pertama."""
+    if df.empty:
+        return df
+
+    def _is_header_row(sr: pd.Series) -> bool:
+        vals = [str(v).strip().lower() for v in sr.fillna("")]
+        keys = ["date", "tanggal", "transaction date", "tgl",
+                "remark", "keterangan", "description", "deskripsi",
+                "credit", "kredit", "cr", "amount", "jumlah"]
+        # anggap header jika minimal 2 kolom 'bernuansa header'
+        score = sum(any(k in v for k in keys) for v in vals)
+        return score >= 2
+
+    # Coba baris 13 (index 12) lalu 14 (index 13)
+    for r in (12, 13):
+        if r < len(df) and _is_header_row(df.iloc[r]):
+            cols = [str(x).strip() for x in df.iloc[r].tolist()]
+            out = df.iloc[r+1:].copy()
+            out.columns = cols
+            out.columns = [str(c).strip().lstrip("\ufeff") for c in out.columns]
+            return out
+
+    # Jika tidak, scan 0..49
+    scan_max = min(50, len(df))
+    for r in range(scan_max):
+        if _is_header_row(df.iloc[r]):
+            cols = [str(x).strip() for x in df.iloc[r].tolist()]
+            out = df.iloc[r+1:].copy()
+            out.columns = cols
+            out.columns = [str(c).strip().lstrip("\ufeff") for c in out.columns]
+            return out
+
+    return df
+
+def _concat_rk_non(files) -> pd.DataFrame:
+    """Baca RK NON BCA per file dan terapkan _promote_header sebelum digabung."""
+    if not files:
+        return pd.DataFrame()
+    frames = []
+    for f in files:
+        df = _read_any(f)
+        if df.empty:
+            continue
+        df = _promote_header(df)
+        if df.empty:
+            continue
+        df.columns = [str(c).strip().lstrip("\ufeff") for c in df.columns]
+        df["__source__"] = f.name
+        frames.append(df)
+    return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
+
 def _month_selector() -> Tuple[int, int]:
     from datetime import date
     today = date.today()
@@ -204,7 +258,7 @@ with st.sidebar:
 tiket_df   = _concat_files(tiket_files)
 settle_df  = _concat_files(settle_files)
 rk_bca_df  = _concat_files(rk_bca_files)
-rk_non_df  = _concat_files(rk_non_files)
+rk_non_df  = _concat_rk_non(rk_non_files)   # <— PENTING: gunakan pembaca khusus untuk NON BCA
 
 if show_preview:
     st.subheader("Pratinjau")
@@ -285,7 +339,7 @@ if go:
     sd_main[s_amt_legacy] = _to_num(sd_main[s_amt_legacy])
     settle_by_date_total = sd_main.groupby(sd_main[s_date_legacy].dt.date, dropna=True)[s_amt_legacy].sum()
 
-    # --- Settlement BCA / Non BCA (berdasar E/L/P) ---
+    # --- Settlement BCA / Non BCA (berdasar E,L,P) ---
     bca_series = pd.Series(dtype=float)
     non_bca_series = pd.Series(dtype=float)
     if not settle_df.empty and s_date_E and s_amt_L and s_prod_P:
@@ -318,7 +372,8 @@ if go:
             bca[rk_amt_bca] = _to_num(bca[rk_amt_bca])
             uang_masuk_bca = bca.groupby(bca[rk_tgl_bca].dt.date, dropna=True)[rk_amt_bca].sum()
 
-    # --- Rekening Koran: Uang Masuk Non BCA (credit/Date/Remark contains 'mrc') ---
+    # --- Rekening Koran: Uang Masuk NON BCA (credit/Date/Remark contains 'mrc') ---
+    # >>> Perbaikan utama: gunakan rk_non_df yang SUDAH dipromote header (baris 13/14) <<<
     uang_masuk_non = pd.Series(dtype=float)
     if not rk_non_df.empty:
         rk_tgl_non  = _find_col(rk_non_df, ["Date","Tanggal","Transaction Date","Tgl"])
@@ -398,7 +453,8 @@ if go:
             rk_tgl_non  = _find_col(rk_non_df, ["Date","Tanggal","Transaction Date","Tgl"])
             rk_amt_non  = _find_col(rk_non_df, ["credit","kredit","cr","amount"])
             rk_rem_non  = _find_col(rk_non_df, ["Remark","Keterangan","Description","Deskripsi"])
-            st.caption(f"RK Non BCA pakai: Tgl=**{rk_tgl_non}**, Amount=**{rk_amt_non}**, Remark=**{rk_rem_non}** (filter 'mrc')")
+            st.caption(f"RK Non BCA pakai: Tgl=**{rk_tgl_non}**, Amount=**{rk_amt_non}**, Remark=**{rk_rem_non}** (filter 'mrc'). "
+                       f"Header dipromote baris 13/14 otomatis bila perlu.")
 
     # Export
     bio = io.BytesIO()
