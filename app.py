@@ -354,7 +354,7 @@ if go:
         st.error("Kolom wajib tidak ditemukan → " + "; ".join(missing))
         st.stop()
 
-    # --- Tiket Detail ---
+    # --- Tiket Detail — utk tabel utama (ESPAY only) ---
     td = tiket_df.copy()
     td[t_date] = td[t_date].apply(_to_date)
     td = td[~td[t_date].isna()]
@@ -449,8 +449,8 @@ if go:
     final["TOTAL UANG MASUK"]                  = total_uang_masuk_ser.values
     final["SELISIH SETTLEMENT - UANG MASUK"]   = final["TOTAL SETTLEMENT"] - final["TOTAL UANG MASUK"]
 
-    # -------- View + total (HILANGKAN kolom TANGGAL di kanan; kunci urutan) --------
-    view = final.reset_index()                     # kolom pertama = index bernama 'Tanggal'
+    # -------- View + total (tabel utama) --------
+    view = final.reset_index()
     idx_col_name = view.columns[0]
     view = view.rename(columns={idx_col_name: "TANGGAL"})
     view.insert(0, "NO", range(1, len(view) + 1))
@@ -469,13 +469,9 @@ if go:
         "TOTAL UANG MASUK": final["TOTAL UANG MASUK"].sum(),
         "SELISIH SETTLEMENT - UANG MASUK": final["SELISIH SETTLEMENT - UANG MASUK"].sum(),
     }])
-
     view_total = pd.concat([view, total_row], ignore_index=True)
-
-    # Buang kemungkinan kolom 'Tanggal' sisa, lalu kunci urutan kolom
     if "Tanggal" in view_total.columns and "TANGGAL" in view_total.columns:
         view_total = view_total.drop(columns=["Tanggal"])
-
     ordered_cols = [
         "NO", "TANGGAL",
         "TIKET DETAIL ESPAY", "SETTLEMENT DANA ESPAY", "SELISIH TIKET DETAIL - SETTLEMENT",
@@ -485,7 +481,6 @@ if go:
     ]
     view_total = view_total.loc[:, ordered_cols]
 
-    # Tabel tampilan (format Rupiah)
     fmt = view_total.copy()
     for c in [
         "TIKET DETAIL ESPAY","SETTLEMENT DANA ESPAY","SELISIH TIKET DETAIL - SETTLEMENT",
@@ -503,13 +498,11 @@ if go:
 
     bio = io.BytesIO()
     with pd.ExcelWriter(bio, engine="openpyxl") as xw:
-        view_total.to_excel(xw, index=False, sheet_name="Rekonsiliasi")     # angka mentah
-        fmt.to_excel(xw, index=False, sheet_name="Rekonsiliasi_View")       # tampilan
+        view_total.to_excel(xw, index=False, sheet_name="Rekonsiliasi")
+        fmt.to_excel(xw, index=False, sheet_name="Rekonsiliasi_View")
 
         wb = xw.book
         ws = wb["Rekonsiliasi_View"]
-
-        # Sisipkan baris header utama di atas header eksisting
         ws.insert_rows(1)
 
         sub_headers = [
@@ -526,16 +519,13 @@ if go:
             "UANG MASUK", "UANG MASUK", "TOTAL UANG MASUK",
             "SELISIH SETTLEMENT - UANG MASUK",
         ]
-
         for col_idx, (top, sub) in enumerate(zip(top_headers, sub_headers), start=1):
             ws.cell(row=1, column=col_idx, value=top)
             ws.cell(row=2, column=col_idx, value=sub)
 
-        # Merge header level-1
         ws.merge_cells(start_row=1, start_column=6, end_row=1, end_column=7)   # SETTLEMENT
         ws.merge_cells(start_row=1, start_column=9, end_row=1, end_column=10)  # UANG MASUK
 
-        # Style
         max_col = ws.max_column
         for c in range(1, max_col + 1):
             ws.cell(row=1, column=c).font = Font(bold=True)
@@ -552,3 +542,100 @@ if go:
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         use_container_width=True,
     )
+
+    # ======================================================================
+    # ================  TABEL BARU: DETAIL TIKET (TYPE × BANK)  ============
+    # ======================================================================
+
+    # cari kolom Type & Bank (untuk join) + amount
+    type_col = _find_col(tiket_df, ["Type","Tipe","Jenis","Payment Type","Channel Type","Transaction Type"])
+    bank_col = t_bank  # sudah dicari di atas
+    amt_col  = t_amt   # sudah dicari di atas; fallback ke type jika perlu
+
+    if type_col and bank_col:
+        # Gunakan sumber TIKET yang HANYA paid, namun TANPA filter 'espay' agar bank2 lain ikut
+        tix = tiket_df.copy()
+        tix[t_date] = tix[t_date].apply(_to_date)
+        tix = tix[~tix[t_date].isna()]
+        tix = tix[(tix[t_date] >= month_start) & (tix[t_date] <= month_end)]
+
+        # filter paid
+        if t_stat:
+            stat_norm = tix[t_stat].astype(str).str.strip().str.lower()
+            tix = tix[stat_norm.str.contains(r"\bpaid\b|\bsuccess\b|sukses|settled|lunas", na=False)]
+
+        # amount
+        if amt_col:
+            tix[amt_col] = _to_num(tix[amt_col])
+        else:
+            # fallback sangat jarang: coba konversi Type sebagai angka
+            tix[type_col] = _to_num(tix[type_col])
+            amt_col = type_col
+
+        # normalisasi bank → kategori
+        def _bank_bucket(s: str) -> str:
+            s = str(s).strip().lower()
+            if "bri" in s: return "BRI"
+            if "bni" in s: return "BNI"
+            if "mandiri" in s: return "MANDIRI"
+            if "bca" in s: return "BCA"
+            return "LAINNYA"
+
+        # normalisasi type → bucket umum
+        def _type_bucket(s: str) -> str:
+            s = str(s).strip().lower()
+            mapping = [
+                ("Cash", ["cash"]),
+                ("Transfer", ["transfer"]),
+                ("Tmanual ASDP", ["tmanual", "manual asdp", "tiket manual"]),
+                ("Prepaid", ["prepaid"]),
+                ("Go Show", ["go show","go-show","goshows"]),
+                ("Virtual Account dan Gerai Retail", ["virtual account","gerai","retail"]),
+                ("ESPAY", ["espay"]),
+                ("e-Money", ["e-money","emoney","e money"]),
+                ("Online", ["online"]),
+            ]
+            for label, keys in mapping:
+                if any(k in s for k in keys):
+                    return label
+            return "Lainnya"
+
+        tix["__TYPE__"] = tix[type_col].apply(_type_bucket)
+        tix["__BANK__"] = tix[bank_col].apply(_bank_bucket)
+
+        # pivot per tanggal: sum amount by (TYPE, BANK)
+        pivot = tix.pivot_table(
+            index=tix[t_date].dt.date,
+            columns=["__TYPE__","__BANK__"],
+            values=amt_col,
+            aggfunc="sum",
+            fill_value=0.0,
+        )
+
+        # urutkan kolom (Type × Bank)
+        TYPE_ORDER = [
+            "Cash","Transfer","Tmanual ASDP","Prepaid","Go Show",
+            "Virtual Account dan Gerai Retail","ESPAY","e-Money","Online","Lainnya"
+        ]
+        BANK_ORDER = ["BRI","BNI","MANDIRI","BCA","LAINNYA"]
+
+        # pastikan MultiIndex penuh, lalu buang kolom nol total
+        full_cols = pd.MultiIndex.from_product([TYPE_ORDER, BANK_ORDER], names=["TYPE","BANK"])
+        pivot = pivot.reindex(columns=full_cols, fill_value=0.0)
+        pivot = pivot.loc[:, (pivot.sum(axis=0) != 0)]
+        pivot.index.name = "Tanggal"
+
+        # tampilkan di bawah tabel utama
+        st.subheader("Detail Tiket per Tanggal — Type × Bank (Tiket Detail)")
+        df2 = pivot.reset_index()
+        df2.insert(0, "NO", range(1, len(df2)+1))
+
+        # format rupiah
+        df2_fmt = df2.copy()
+        for c in df2_fmt.columns:
+            if c not in ("NO","Tanggal"):
+                df2_fmt[c] = df2_fmt[c].apply(_idr_fmt)
+
+        st.dataframe(df2_fmt, use_container_width=True, hide_index=True)
+    else:
+        st.info("Kolom **Type** atau **Bank** tidak ditemukan di Tiket Detail, sehingga tabel 'Detail Tiket (Type × Bank)' tidak bisa dibuat.")
