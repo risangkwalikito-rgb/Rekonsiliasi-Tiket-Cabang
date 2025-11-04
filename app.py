@@ -9,7 +9,7 @@ Rekonsiliasi: Tiket Detail vs Settlement Dana
     * Rekening Koran BCA (CSV/Excel)
     * Rekening Koran Non BCA (CSV/Excel)
 - Parser uang/tanggal robust (format Eropa & serial Excel)
-- Tiket difilter: St Bayar mengandung 'paid' SAJA (untuk Tabel 1) & Bank mengandung 'ESPAY'
+- Tabel 1: TIKET DETAIL ESPAY hanya status 'PAID' (persis) & Bank mengandung 'ESPAY'
 """
 
 from __future__ import annotations
@@ -171,7 +171,7 @@ def _read_any(uploaded_file) -> pd.DataFrame:
 def _find_col(df: pd.DataFrame, names: List[str]) -> Optional[str]:
     if df.empty:
         return None
-    cols = [c for c in df.columns jika isinstance(c, str)]  # tetap seperti sebelumnya
+    cols = [c for c in df.columns if isinstance(c, str)]
     m = {c.lower().strip().lstrip("\ufeff"): c for c in cols}
     for n in names:
         key = n.lower().strip()
@@ -255,9 +255,11 @@ def _month_selector() -> Tuple[int, int]:
     from datetime import date
     today = date.today()
     years = list(range(today.year - 5, today.year + 2))
-    months = [("01","Januari"),("02","Februari"),("03","Maret"),("04","April"),
-              ("05","Juni"),("06","Juli"),("07","Agustus"),
-              ("09","September"),("10","Oktober"),("11","November"),("12","Desember")]
+    months = [
+        ("01","Januari"), ("02","Februari"), ("03","Maret"), ("04","April"),
+        ("05","Mei"), ("06","Juni"), ("07","Juli"), ("08","Agustus"),
+        ("09","September"), ("10","Oktober"), ("11","November"), ("12","Desember")
+    ]
     col1, col2 = st.columns(2)
     with col1:
         year = st.selectbox("Tahun", years, index=years.index(today.year))
@@ -297,7 +299,7 @@ rk_bca_df  = _concat_files(rk_bca_files)
 rk_non_df  = _concat_rk_non(rk_non_files)   # KHUSUS Non BCA → promote header 13/14
 
 if go:
-    # --- Tiket: PISAHKAN dua kandidat kolom tanggal ---
+    # --- Tiket: dua kandidat kolom tanggal ---
     t_date_main = _find_col(tiket_df, ["Paid Date","Payment Date","Tanggal Bayar","Tanggal"])
     if t_date_main is None:
         t_date_main = _find_col(tiket_df, ["Action/Action Date","Action Date","Action","Action date","Tanggal"])
@@ -310,7 +312,7 @@ if go:
     t_stat = _find_col(tiket_df, ["St Bayar","Status Bayar","status","status bayar"])
     t_bank = _find_col(tiket_df, ["Bank","Payment Channel","channel","payment method"])
 
-    # --- Settlement Dana (legacy/semula): Transaction Date + Settlement Amount ---
+    # --- Settlement Dana (utama/semula) ---
     s_date_legacy = _find_col(settle_df, ["Transaction Date","Tanggal Transaksi","Tanggal"])
     s_amt_legacy  = _find_col(settle_df, ["Settlement Amount","Amount","Nominal","Jumlah"])
     if s_amt_legacy is None and not settle_df.empty and len(settle_df.columns) >= 12:
@@ -352,17 +354,15 @@ if go:
     td[t_date_main] = td[t_date_main].apply(_to_date)
     td = td[~td[t_date_main].isna()]
 
-    # HANYA status 'paid' (tepat), tidak termasuk 'success/sukses/settled/lunas'
     td_stat_norm = td[t_stat].astype(str).str.strip().str.lower()
     td_bank_norm = td[t_bank].astype(str).str.strip().str.lower()
-    paid_mask  = td_stat_norm.eq("paid")        # <--- perubahan utama
+    paid_mask  = td_stat_norm.eq("paid")  # hanya 'paid' persis
     espay_mask = td_bank_norm.str.contains("espay", na=False)
     td = td[paid_mask & espay_mask]
 
     td = td[(td[t_date_main] >= month_start) & (td[t_date_main] <= month_end)]
     td[t_amt] = _to_num(td[t_amt])
     tiket_by_date = td.groupby(td[t_date_main].dt.date, dropna=True)[t_amt].sum()
-    # ---------------------------------------------------------------------
 
     # --- Settlement Dana (utama/semula) ---
     sd_main = settle_df.copy()
@@ -572,7 +572,7 @@ if go:
             return "LAINNYA"
 
         def _type_bucket(s: str) -> str:
-            s = str(s).strip().str.lower()
+            s = str(s).strip().lower()
             mapping = [
                 ("Cash", ["cash"]),
                 ("Transfer", ["transfer"]),
