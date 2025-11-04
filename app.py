@@ -9,7 +9,7 @@ Rekonsiliasi: Tiket Detail vs Settlement Dana
     * Rekening Koran BCA (CSV/Excel)
     * Rekening Koran Non BCA (CSV/Excel)
 - Parser uang/tanggal robust (format Eropa & serial Excel)
-- Tiket difilter: St Bayar mengandung 'paid/success/sukses/settled/lunas' & Bank mengandung 'ESPAY'
+- TABEL 1: TIKET DETAIL ESPAY diambil dari Action Date + Bank = 'ESPAY' + St Bayar = 'paid' + nominal dari kolom 'Tarif'
 """
 
 from __future__ import annotations
@@ -17,6 +17,7 @@ from __future__ import annotations
 import io
 import re
 import calendar
+import unicodedata
 from typing import Optional, List, Tuple
 
 import numpy as np
@@ -59,6 +60,13 @@ def _parse_money(val) -> float:
 
 def _to_num(sr: pd.Series) -> pd.Series:
     return sr.apply(_parse_money).astype(float)
+
+# --- Text normalizer (hapus aksen/diakritik, lowercase) ---
+def _norm_str(val) -> str:
+    s = "" if val is None else str(val)
+    s = unicodedata.normalize("NFKD", s)
+    s = "".join(ch for ch in s if not unicodedata.combining(ch))
+    return s.strip().lower()
 
 # --- Date parser (day-first + Excel serial) ---
 _ddmmyyyy = re.compile(r"\b(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{2,4})\b")
@@ -255,9 +263,11 @@ def _month_selector() -> Tuple[int, int]:
     from datetime import date
     today = date.today()
     years = list(range(today.year - 5, today.year + 2))
-    months = [("01","Januari"),("02","Februari"),("03","Maret"),("04","April"),
-              ("05","Mei"),("06","Juni"),("07","Juli"),("08","Agustus"),
-              ("09","September"),("10","Oktober"),("11","November"),("12","Desember")]
+    months = [
+        ("01","Januari"), ("02","Februari"), ("03","Maret"), ("04","April"),
+        ("05","Mei"), ("06","Juni"), ("07","Juli"), ("08","Agustus"),
+        ("09","September"), ("10","Oktober"), ("11","November"), ("12","Desember")
+    ]
     col1, col2 = st.columns(2)
     with col1:
         year = st.selectbox("Tahun", years, index=years.index(today.year))
@@ -296,28 +306,29 @@ settle_df  = _concat_files(settle_files)
 rk_bca_df  = _concat_files(rk_bca_files)
 rk_non_df  = _concat_rk_non(rk_non_files)   # KHUSUS Non BCA → promote header 13/14
 
-if show_preview:
-    st.subheader("Pratinjau")
-    if not tiket_df.empty:
-        st.markdown(f"Tiket Detail (rows: {len(tiket_df)})"); st.dataframe(tiket_df.head(50), use_container_width=True)
-    if not settle_df.empty:
-        st.markdown(f"Settlement Dana (rows: {len(settle_df)})"); st.dataframe(settle_df.head(50), use_container_width=True)
-    if not rk_bca_df.empty:
-        st.markdown(f"Rekening Koran BCA (rows: {len(rk_bca_df)})"); st.dataframe(rk_bca_df.head(50), use_container_width=True)
-    if not rk_non_df.empty:
-        st.markdown(f"Rekening Koran Non BCA (rows: {len(rk_non_df)})"); st.dataframe(rk_non_df.head(50), use_container_width=True)
-
 if go:
-    # --- Tiket: tanggal prioritas Action/Action Date ---
-    t_date = _find_col(tiket_df, [
-        "Action/Action Date","Action Date","Action","Action date",
-        "Paid Date","Payment Date","Tanggal Bayar","Tanggal"
-    ])
-    t_amt  = _find_col(tiket_df, ["tarif","amount","nominal","jumlah","total"])
+    # ---------------------- Tiket Detail (TABEL 1) ----------------------
+    # Kolom tanggal UTAMA: Action Date
+    t_date_action = _find_col(tiket_df, ["Action/Action Date","Action Date","Action","Action date"])
+    if t_date_action is None:
+        st.error("Kolom tanggal 'Action Date' tidak ditemukan pada Tiket Detail.")
+        st.stop()
+
+    # Nominal: wajib 'Tarif'
+    t_amt_tarif = _find_col(tiket_df, ["Tarif","tarif"])
+    if t_amt_tarif is None:
+        st.error("Kolom nominal 'Tarif' tidak ditemukan pada Tiket Detail.")
+        st.stop()
+
+    # Status & Bank
     t_stat = _find_col(tiket_df, ["St Bayar","Status Bayar","status","status bayar"])
     t_bank = _find_col(tiket_df, ["Bank","Payment Channel","channel","payment method"])
+    if t_stat is None or t_bank is None:
+        st.error("Kolom 'St Bayar' atau 'Bank' tidak ditemukan pada Tiket Detail.")
+        st.stop()
 
-    # --- Settlement Dana (legacy/semula): Transaction Date + Settlement Amount ---
+    # ---------------------- Mapping lain (untuk bagian lain aplikasi) ----------------------
+    # Settlement Dana (utama/semula)
     s_date_legacy = _find_col(settle_df, ["Transaction Date","Tanggal Transaksi","Tanggal"])
     s_amt_legacy  = _find_col(settle_df, ["Settlement Amount","Amount","Nominal","Jumlah"])
     if s_amt_legacy is None and not settle_df.empty and len(settle_df.columns) >= 12:
@@ -327,7 +338,7 @@ if go:
         if s_date_legacy is None and not settle_df.empty and len(settle_df.columns) >= 5:
             s_date_legacy = settle_df.columns[4]  # kolom E
 
-    # --- Untuk BCA/Non-BCA (pakai E/L/P) ---
+    # Untuk BCA/Non-BCA (pakai E/L/P)
     s_date_E = _find_col(settle_df, ["Settlement Date","Tanggal Settlement","Settle Date","Tanggal"])
     s_amt_L  = _find_col(settle_df, ["Settlement Amount","Amount","Nominal","Jumlah"])
     if s_amt_L is None and not settle_df.empty and len(settle_df.columns) >= 12:
@@ -338,13 +349,9 @@ if go:
     if s_prod_P is None and not settle_df.empty and len(settle_df.columns) >= 16:
         s_prod_P = settle_df.columns[15]
 
-    # --- Validasi minimal ---
+    # Validasi minimal Settlement
     missing = []
     for name, col, src in [
-        ("Action/Action Date", t_date, "Tiket Detail"),
-        ("tarif/amount", t_amt, "Tiket Detail"),
-        ("St Bayar/Status", t_stat, "Tiket Detail"),
-        ("Bank/Channel", t_bank, "Tiket Detail"),
         ("Transaction Date/Tanggal Transaksi", s_date_legacy, "Settlement Dana (utama)"),
         ("Settlement Amount/L", s_amt_legacy, "Settlement Dana (utama)"),
     ]:
@@ -354,20 +361,30 @@ if go:
         st.error("Kolom wajib tidak ditemukan → " + "; ".join(missing))
         st.stop()
 
-    # --- Tiket Detail ---
+    # ------------------  TABEL 1: TIKET DETAIL ESPAY  -------------------
     td = tiket_df.copy()
-    td[t_date] = td[t_date].apply(_to_date)
-    td = td[~td[t_date].isna()]
-    td_stat_norm = td[t_stat].astype(str).str.strip().str.lower()
-    td_bank_norm = td[t_bank].astype(str).str.strip().str.lower()
-    paid_mask  = td_stat_norm.str.contains(r"\bpaid\b|\bsuccess\b|sukses|settled|lunas", na=False)
-    espay_mask = td_bank_norm.str.contains("espay", na=False)
-    td = td[paid_mask & espay_mask]
-    td = td[(td[t_date] >= month_start) & (td[t_date] <= month_end)]
-    td[t_amt] = _to_num(td[t_amt])
-    tiket_by_date = td.groupby(td[t_date].dt.date, dropna=True)[t_amt].sum()
+    td[t_date_action] = td[t_date_action].apply(_to_date)
+    td = td[~td[t_date_action].isna()]
 
-    # --- Settlement Dana (utama/semula) ---
+    # Normalisasi Bank & Status
+    td_bank_norm = td[t_bank].apply(_norm_str)
+    td_stat_norm = td[t_stat].apply(_norm_str)
+
+    # Filter ketat: Bank == 'espay' dan St Bayar == 'paid'
+    bank_mask = td_bank_norm.eq("espay")
+    paid_mask = td_stat_norm.eq("paid")
+    td = td[bank_mask & paid_mask]
+
+    # Range bulan
+    td = td[(td[t_date_action] >= month_start) & (td[t_date_action] <= month_end)]
+
+    # Nominal dari kolom 'Tarif'
+    td[t_amt_tarif] = _to_num(td[t_amt_tarif])
+
+    # Agregasi per tanggal (Action Date)
+    tiket_by_date = td.groupby(td[t_date_action].dt.date, dropna=True)[t_amt_tarif].sum()
+
+    # ------------------  Settlement Dana (utama/semula) ------------------
     sd_main = settle_df.copy()
     sd_main[s_date_legacy] = sd_main[s_date_legacy].apply(_to_date)
     sd_main = sd_main[~sd_main[s_date_legacy].isna()]
@@ -375,7 +392,7 @@ if go:
     sd_main[s_amt_legacy] = _to_num(sd_main[s_amt_legacy])
     settle_by_date_total = sd_main.groupby(sd_main[s_date_legacy].dt.date, dropna=True)[s_amt_legacy].sum()
 
-    # --- Settlement BCA / Non BCA dari E/L/P ---
+    # --- Settlement BCA / Non BCA dari E/L/P (untuk split) ---
     bca_series = pd.Series(dtype=float)
     non_bca_series = pd.Series(dtype=float)
     if not settle_df.empty and s_date_E and s_amt_L and s_prod_P:
@@ -403,7 +420,7 @@ if go:
             bca = bca[~bca[rk_tgl_bca].isna()]
             bca = bca[(bca[rk_tgl_bca] >= month_start) & (bca[rk_tgl_bca] <= month_end)]
             ket_norm = bca[rk_ket_bca].astype(str).str.strip().str.lower()
-            mrc_mask = ket_norm.str.contains("mrc", na=False)
+            mrc_mask = ket_norm.str_contains("mrc", na=False)
             bca = bca[mrc_mask]
             bca[rk_amt_bca] = _to_num(bca[rk_amt_bca])
             uang_masuk_bca = bca.groupby(bca[rk_tgl_bca].dt.date, dropna=True)[rk_amt_bca].sum()
@@ -449,8 +466,8 @@ if go:
     final["TOTAL UANG MASUK"]                  = total_uang_masuk_ser.values
     final["SELISIH SETTLEMENT - UANG MASUK"]   = final["TOTAL SETTLEMENT"] - final["TOTAL UANG MASUK"]
 
-    # -------- View + total (HILANGKAN kolom TANGGAL di kanan; kunci urutan) --------
-    view = final.reset_index()                     # kolom pertama = index bernama 'Tanggal'
+    # -------- View + total (tabel utama) --------
+    view = final.reset_index()
     idx_col_name = view.columns[0]
     view = view.rename(columns={idx_col_name: "TANGGAL"})
     view.insert(0, "NO", range(1, len(view) + 1))
@@ -469,13 +486,9 @@ if go:
         "TOTAL UANG MASUK": final["TOTAL UANG MASUK"].sum(),
         "SELISIH SETTLEMENT - UANG MASUK": final["SELISIH SETTLEMENT - UANG MASUK"].sum(),
     }])
-
     view_total = pd.concat([view, total_row], ignore_index=True)
-
-    # Buang kemungkinan kolom 'Tanggal' sisa, lalu kunci urutan kolom
     if "Tanggal" in view_total.columns and "TANGGAL" in view_total.columns:
         view_total = view_total.drop(columns=["Tanggal"])
-
     ordered_cols = [
         "NO", "TANGGAL",
         "TIKET DETAIL ESPAY", "SETTLEMENT DANA ESPAY", "SELISIH TIKET DETAIL - SETTLEMENT",
@@ -485,7 +498,6 @@ if go:
     ]
     view_total = view_total.loc[:, ordered_cols]
 
-    # Tabel tampilan (format Rupiah)
     fmt = view_total.copy()
     for c in [
         "TIKET DETAIL ESPAY","SETTLEMENT DANA ESPAY","SELISIH TIKET DETAIL - SETTLEMENT",
@@ -503,13 +515,11 @@ if go:
 
     bio = io.BytesIO()
     with pd.ExcelWriter(bio, engine="openpyxl") as xw:
-        view_total.to_excel(xw, index=False, sheet_name="Rekonsiliasi")     # angka mentah
-        fmt.to_excel(xw, index=False, sheet_name="Rekonsiliasi_View")       # tampilan
+        view_total.to_excel(xw, index=False, sheet_name="Rekonsiliasi")
+        fmt.to_excel(xw, index=False, sheet_name="Rekonsiliasi_View")
 
         wb = xw.book
         ws = wb["Rekonsiliasi_View"]
-
-        # Sisipkan baris header utama di atas header eksisting
         ws.insert_rows(1)
 
         sub_headers = [
@@ -526,16 +536,13 @@ if go:
             "UANG MASUK", "UANG MASUK", "TOTAL UANG MASUK",
             "SELISIH SETTLEMENT - UANG MASUK",
         ]
-
         for col_idx, (top, sub) in enumerate(zip(top_headers, sub_headers), start=1):
             ws.cell(row=1, column=col_idx, value=top)
             ws.cell(row=2, column=col_idx, value=sub)
 
-        # Merge header level-1
         ws.merge_cells(start_row=1, start_column=6, end_row=1, end_column=7)   # SETTLEMENT
         ws.merge_cells(start_row=1, start_column=9, end_row=1, end_column=10)  # UANG MASUK
 
-        # Style
         max_col = ws.max_column
         for c in range(1, max_col + 1):
             ws.cell(row=1, column=c).font = Font(bold=True)
@@ -552,3 +559,89 @@ if go:
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         use_container_width=True,
     )
+
+    # ======================================================================
+    # ================  TABEL BARU: DETAIL TIKET (TYPE × BANK)  ============
+    # ======================================================================
+
+    # Untuk tabel 2, gunakan Action Date juga sebagai tanggal
+    t_date_any = t_date_action
+    type_col = _find_col(tiket_df, ["Type","Tipe","Jenis","Payment Type","Channel Type","Transaction Type"])
+    bank_col = t_bank
+    # Untuk tabel 2 nominal bisa pakai kolom umum (fallback jika ada)
+    t_amt_any = _find_col(tiket_df, ["tarif","amount","nominal","jumlah","total"])
+
+    if type_col and bank_col and t_date_any and t_amt_any:
+        tix = tiket_df.copy()
+        tix[t_date_any] = tix[t_date_any].apply(_to_date)
+        tix = tix[~tix[t_date_any].isna()]
+        tix = tix[(tix[t_date_any] >= month_start) & (tix[t_date_any] <= month_end)]
+        if t_stat:
+            stat_norm = tix[t_stat].astype(str).str.strip().str.lower()
+            # Tabel 2 longgar: paid/success/sukses/settled/lunas
+            tix = tix[stat_norm.str.contains(r"\bpaid\b|\bsuccess\b|sukses|settled|lunas", na=False)]
+        tix[t_amt_any] = _to_num(tix[t_amt_any])
+
+        def _bank_bucket(s: str) -> str:
+            s = str(s).strip().lower()
+            if "bri" in s: return "BRI"
+            if "bni" in s: return "BNI"
+            if "mandiri" in s: return "MANDIRI"
+            if "bca" in s: return "BCA"
+            return "LAINNYA"
+
+        def _type_bucket(s: str) -> str:
+            s = str(s).strip().lower()
+            mapping = [
+                ("Cash", ["cash"]),
+                ("Transfer", ["transfer"]),
+                ("Tmanual ASDP", ["tmanual", "manual asdp", "tiket manual"]),
+                ("Prepaid", ["prepaid"]),
+                ("Go Show", ["go show","go-show","goshows"]),
+                ("Virtual Account dan Gerai Retail", ["virtual account","gerai","retail"]),
+                ("ESPAY", ["espay"]),
+                ("e-Money", ["e-money","emoney","e money"]),
+                ("Online", ["online"]),
+            ]
+            for label, keys in mapping:
+                if any(k in s for k in keys):
+                    return label
+            return "Lainnya"
+
+        tix["__TYPE__"] = tix[type_col].apply(_type_bucket)
+        tix["__BANK__"] = tix[bank_col].apply(_bank_bucket)
+
+        pivot = tix.pivot_table(
+            index=tix[t_date_any].dt.date,
+            columns=["__TYPE__","__BANK__"],
+            values=t_amt_any,
+            aggfunc="sum",
+            fill_value=0.0,
+        )
+
+        TYPE_ORDER = [
+            "Cash","Transfer","Tmanual ASDP","Prepaid","Go Show",
+            "Virtual Account dan Gerai Retail","ESPAY","e-Money","Online","Lainnya"
+        ]
+        BANK_ORDER = ["BRI","BNI","MANDIRI","BCA","LAINNYA"]
+        full_cols = pd.MultiIndex.from_product([TYPE_ORDER, BANK_ORDER], names=["TYPE","BANK"])
+        pivot = pivot.reindex(columns=full_cols, fill_value=0.0)
+        pivot = pivot.loc[:, (pivot.sum(axis=0) != 0)]
+        pivot.index.name = "Tanggal"
+
+        st.subheader("Detail Tiket per Tanggal — Type × Bank (Tiket Detail)")
+        df2 = pivot.reset_index()
+        df2.insert(0, "NO", range(1, len(df2) + 1))
+
+        # format rupiah hanya untuk kolom numerik
+        from pandas.api.types import is_numeric_dtype
+        df2_fmt = df2.copy()
+        for c in df2_fmt.columns:
+            if c in ("NO", "Tanggal"):
+                continue
+            if is_numeric_dtype(df2_fmt[c]):
+                df2_fmt[c] = df2_fmt[c].apply(_idr_fmt)
+
+        st.dataframe(df2_fmt, use_container_width=True, hide_index=True)
+    else:
+        st.info("Kolom **Type/Bank/Tanggal/Nominal** tidak lengkap di Tiket Detail, tabel 'Detail Tiket (Type × Bank)' tidak bisa dibuat.")
