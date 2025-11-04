@@ -256,7 +256,7 @@ def _month_selector() -> Tuple[int, int]:
     today = date.today()
     years = list(range(today.year - 5, today.year + 2))
     months = [("01","Januari"),("02","Februari"),("03","Maret"),("04","April"),
-              ("05","Mei"),("06","Juni"),("07","Juli"),("08","Agustus"),
+              ("05","Juni"),("06","Juli"),("07","Agustus"),
               ("09","September"),("10","Oktober"),("11","November"),("12","Desember")]
     col1, col2 = st.columns(2)
     with col1:
@@ -313,7 +313,6 @@ if go:
     #   * t_date_any  → untuk kebutuhan lain (mis. tabel kedua) bila perlu Action Date
     t_date_main = _find_col(tiket_df, ["Paid Date","Payment Date","Tanggal Bayar","Tanggal"])
     if t_date_main is None:
-        # fallback jika tidak ada Paid Date sama sekali
         t_date_main = _find_col(tiket_df, ["Action/Action Date","Action Date","Action","Action date","Tanggal"])
     t_date_any = _find_col(tiket_df, [
         "Action/Action Date","Action Date","Action","Action date",
@@ -361,11 +360,7 @@ if go:
         st.error("Kolom wajib tidak ditemukan → " + "; ".join(missing))
         st.stop()
 
-    # ---------------------------------------------------------------------
     # ------------------  TABEL 1 (TIDAK DIUBAH RUMUSNYA)  ----------------
-    # ---------------------------------------------------------------------
-    # TIKET DETAIL ESPAY: berdasarkan Paid/Payment/Tanggal Bayar (t_date_main),
-    # status paid/sukses..., dan bank mengandung 'espay'.
     td = tiket_df.copy()
     td[t_date_main] = td[t_date_main].apply(_to_date)
     td = td[~td[t_date_main].isna()]
@@ -377,7 +372,6 @@ if go:
     td = td[(td[t_date_main] >= month_start) & (td[t_date_main] <= month_end)]
     td[t_amt] = _to_num(td[t_amt])
     tiket_by_date = td.groupby(td[t_date_main].dt.date, dropna=True)[t_amt].sum()
-    # ---------------------------------------------------------------------
 
     # --- Settlement Dana (utama/semula) ---
     sd_main = settle_df.copy()
@@ -559,7 +553,6 @@ if go:
     # ================  TABEL BARU: DETAIL TIKET (TYPE × BANK)  ============
     # ======================================================================
 
-    # Untuk tabel kedua gunakan t_date_any (boleh Action/Action Date bila ada)
     type_col = _find_col(tiket_df, ["Type","Tipe","Jenis","Payment Type","Channel Type","Transaction Type"])
     bank_col = t_bank
     amt_col  = t_amt
@@ -627,7 +620,7 @@ if go:
 
         st.subheader("Detail Tiket per Tanggal — Type × Bank (Tiket Detail)")
         df2 = pivot.reset_index()
-        df2.insert(0, "NO", range(1, len[df2)+1))
+        df2.insert(0, "NO", range(1, len(df2) + 1))  # <-- diperbaiki dari len[df2] jadi len(df2)
 
         # format rupiah hanya untuk kolom numerik
         from pandas.api.types import is_numeric_dtype
