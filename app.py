@@ -9,7 +9,7 @@ Rekonsiliasi: Tiket Detail vs Settlement Dana
     * Rekening Koran BCA (CSV/Excel)
     * Rekening Koran Non BCA (CSV/Excel)
 - Parser uang/tanggal robust (format Eropa & serial Excel)
-- Tiket difilter: St Bayar mengandung 'paid/success/sukses/settled/lunas' & Bank mengandung 'ESPAY'
+- Tiket difilter: St Bayar mengandung 'paid' SAJA (untuk Tabel 1) & Bank mengandung 'ESPAY'
 """
 
 from __future__ import annotations
@@ -171,7 +171,7 @@ def _read_any(uploaded_file) -> pd.DataFrame:
 def _find_col(df: pd.DataFrame, names: List[str]) -> Optional[str]:
     if df.empty:
         return None
-    cols = [c for c in df.columns if isinstance(c, str)]
+    cols = [c for c in df.columns jika isinstance(c, str)]  # tetap seperti sebelumnya
     m = {c.lower().strip().lstrip("\ufeff"): c for c in cols}
     for n in names:
         key = n.lower().strip()
@@ -256,7 +256,7 @@ def _month_selector() -> Tuple[int, int]:
     today = date.today()
     years = list(range(today.year - 5, today.year + 2))
     months = [("01","Januari"),("02","Februari"),("03","Maret"),("04","April"),
-              ("05","Mei"),("06","Juni"),("07","Juli"),("08","Agustus"),
+              ("05","Juni"),("06","Juli"),("07","Agustus"),
               ("09","September"),("10","Oktober"),("11","November"),("12","Desember")]
     col1, col2 = st.columns(2)
     with col1:
@@ -296,23 +296,16 @@ settle_df  = _concat_files(settle_files)
 rk_bca_df  = _concat_files(rk_bca_files)
 rk_non_df  = _concat_rk_non(rk_non_files)   # KHUSUS Non BCA → promote header 13/14
 
-if show_preview:
-    st.subheader("Pratinjau")
-    if not tiket_df.empty:
-        st.markdown(f"Tiket Detail (rows: {len(tiket_df)})"); st.dataframe(tiket_df.head(50), use_container_width=True)
-    if not settle_df.empty:
-        st.markdown(f"Settlement Dana (rows: {len(settle_df)})"); st.dataframe(settle_df.head(50), use_container_width=True)
-    if not rk_bca_df.empty:
-        st.markdown(f"Rekening Koran BCA (rows: {len(rk_bca_df)})"); st.dataframe(rk_bca_df.head(50), use_container_width=True)
-    if not rk_non_df.empty:
-        st.markdown(f"Rekening Koran Non BCA (rows: {len(rk_non_df)})"); st.dataframe(rk_non_df.head(50), use_container_width=True)
-
 if go:
-    # --- Tiket: tanggal prioritas Action/Action Date ---
-    t_date = _find_col(tiket_df, [
+    # --- Tiket: PISAHKAN dua kandidat kolom tanggal ---
+    t_date_main = _find_col(tiket_df, ["Paid Date","Payment Date","Tanggal Bayar","Tanggal"])
+    if t_date_main is None:
+        t_date_main = _find_col(tiket_df, ["Action/Action Date","Action Date","Action","Action date","Tanggal"])
+    t_date_any = _find_col(tiket_df, [
         "Action/Action Date","Action Date","Action","Action date",
         "Paid Date","Payment Date","Tanggal Bayar","Tanggal"
     ])
+
     t_amt  = _find_col(tiket_df, ["tarif","amount","nominal","jumlah","total"])
     t_stat = _find_col(tiket_df, ["St Bayar","Status Bayar","status","status bayar"])
     t_bank = _find_col(tiket_df, ["Bank","Payment Channel","channel","payment method"])
@@ -341,7 +334,7 @@ if go:
     # --- Validasi minimal ---
     missing = []
     for name, col, src in [
-        ("Action/Action Date", t_date, "Tiket Detail"),
+        ("Paid/Payment/Tanggal Bayar", t_date_main, "Tiket Detail (Tabel 1)"),
         ("tarif/amount", t_amt, "Tiket Detail"),
         ("St Bayar/Status", t_stat, "Tiket Detail"),
         ("Bank/Channel", t_bank, "Tiket Detail"),
@@ -354,18 +347,22 @@ if go:
         st.error("Kolom wajib tidak ditemukan → " + "; ".join(missing))
         st.stop()
 
-    # --- Tiket Detail ---
+    # ------------------  TABEL 1 (TIKET DETAIL ESPAY = PAID SAJA)  ----------------
     td = tiket_df.copy()
-    td[t_date] = td[t_date].apply(_to_date)
-    td = td[~td[t_date].isna()]
+    td[t_date_main] = td[t_date_main].apply(_to_date)
+    td = td[~td[t_date_main].isna()]
+
+    # HANYA status 'paid' (tepat), tidak termasuk 'success/sukses/settled/lunas'
     td_stat_norm = td[t_stat].astype(str).str.strip().str.lower()
     td_bank_norm = td[t_bank].astype(str).str.strip().str.lower()
-    paid_mask  = td_stat_norm.str.contains(r"\bpaid\b|\bsuccess\b|sukses|settled|lunas", na=False)
+    paid_mask  = td_stat_norm.eq("paid")        # <--- perubahan utama
     espay_mask = td_bank_norm.str.contains("espay", na=False)
     td = td[paid_mask & espay_mask]
-    td = td[(td[t_date] >= month_start) & (td[t_date] <= month_end)]
+
+    td = td[(td[t_date_main] >= month_start) & (td[t_date_main] <= month_end)]
     td[t_amt] = _to_num(td[t_amt])
-    tiket_by_date = td.groupby(td[t_date].dt.date, dropna=True)[t_amt].sum()
+    tiket_by_date = td.groupby(td[t_date_main].dt.date, dropna=True)[t_amt].sum()
+    # ---------------------------------------------------------------------
 
     # --- Settlement Dana (utama/semula) ---
     sd_main = settle_df.copy()
@@ -449,8 +446,8 @@ if go:
     final["TOTAL UANG MASUK"]                  = total_uang_masuk_ser.values
     final["SELISIH SETTLEMENT - UANG MASUK"]   = final["TOTAL SETTLEMENT"] - final["TOTAL UANG MASUK"]
 
-    # -------- View + total (HILANGKAN kolom TANGGAL di kanan; kunci urutan) --------
-    view = final.reset_index()                     # kolom pertama = index bernama 'Tanggal'
+    # -------- View + total (tabel utama) --------
+    view = final.reset_index()
     idx_col_name = view.columns[0]
     view = view.rename(columns={idx_col_name: "TANGGAL"})
     view.insert(0, "NO", range(1, len(view) + 1))
@@ -469,13 +466,9 @@ if go:
         "TOTAL UANG MASUK": final["TOTAL UANG MASUK"].sum(),
         "SELISIH SETTLEMENT - UANG MASUK": final["SELISIH SETTLEMENT - UANG MASUK"].sum(),
     }])
-
     view_total = pd.concat([view, total_row], ignore_index=True)
-
-    # Buang kemungkinan kolom 'Tanggal' sisa, lalu kunci urutan kolom
     if "Tanggal" in view_total.columns and "TANGGAL" in view_total.columns:
         view_total = view_total.drop(columns=["Tanggal"])
-
     ordered_cols = [
         "NO", "TANGGAL",
         "TIKET DETAIL ESPAY", "SETTLEMENT DANA ESPAY", "SELISIH TIKET DETAIL - SETTLEMENT",
@@ -485,7 +478,6 @@ if go:
     ]
     view_total = view_total.loc[:, ordered_cols]
 
-    # Tabel tampilan (format Rupiah)
     fmt = view_total.copy()
     for c in [
         "TIKET DETAIL ESPAY","SETTLEMENT DANA ESPAY","SELISIH TIKET DETAIL - SETTLEMENT",
@@ -503,13 +495,11 @@ if go:
 
     bio = io.BytesIO()
     with pd.ExcelWriter(bio, engine="openpyxl") as xw:
-        view_total.to_excel(xw, index=False, sheet_name="Rekonsiliasi")     # angka mentah
-        fmt.to_excel(xw, index=False, sheet_name="Rekonsiliasi_View")       # tampilan
+        view_total.to_excel(xw, index=False, sheet_name="Rekonsiliasi")
+        fmt.to_excel(xw, index=False, sheet_name="Rekonsiliasi_View")
 
         wb = xw.book
         ws = wb["Rekonsiliasi_View"]
-
-        # Sisipkan baris header utama di atas header eksisting
         ws.insert_rows(1)
 
         sub_headers = [
@@ -526,16 +516,13 @@ if go:
             "UANG MASUK", "UANG MASUK", "TOTAL UANG MASUK",
             "SELISIH SETTLEMENT - UANG MASUK",
         ]
-
         for col_idx, (top, sub) in enumerate(zip(top_headers, sub_headers), start=1):
             ws.cell(row=1, column=col_idx, value=top)
             ws.cell(row=2, column=col_idx, value=sub)
 
-        # Merge header level-1
         ws.merge_cells(start_row=1, start_column=6, end_row=1, end_column=7)   # SETTLEMENT
         ws.merge_cells(start_row=1, start_column=9, end_row=1, end_column=10)  # UANG MASUK
 
-        # Style
         max_col = ws.max_column
         for c in range(1, max_col + 1):
             ws.cell(row=1, column=c).font = Font(bold=True)
@@ -552,3 +539,90 @@ if go:
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         use_container_width=True,
     )
+
+    # ======================================================================
+    # ================  TABEL BARU: DETAIL TIKET (TYPE × BANK)  ============
+    # ======================================================================
+
+    type_col = _find_col(tiket_df, ["Type","Tipe","Jenis","Payment Type","Channel Type","Transaction Type"])
+    bank_col = t_bank
+    amt_col  = t_amt
+
+    if type_col and bank_col and t_date_any:
+        tix = tiket_df.copy()
+        tix[t_date_any] = tix[t_date_any].apply(_to_date)
+        tix = tix[~tix[t_date_any].isna()]
+        tix = tix[(tix[t_date_any] >= month_start) & (tix[t_date_any] <= month_end)]
+        if t_stat:
+            stat_norm = tix[t_stat].astype(str).str.strip().str.lower()
+            # Tabel 2 tetap longgar (paid/success/sukses/settled/lunas)
+            tix = tix[stat_norm.str.contains(r"\bpaid\b|\bsuccess\b|sukses|settled|lunas", na=False)]
+        if amt_col:
+            tix[amt_col] = _to_num(tix[amt_col])
+        else:
+            tix[type_col] = _to_num(tix[type_col])
+            amt_col = type_col
+
+        def _bank_bucket(s: str) -> str:
+            s = str(s).strip().lower()
+            if "bri" in s: return "BRI"
+            if "bni" in s: return "BNI"
+            if "mandiri" in s: return "MANDIRI"
+            if "bca" in s: return "BCA"
+            return "LAINNYA"
+
+        def _type_bucket(s: str) -> str:
+            s = str(s).strip().str.lower()
+            mapping = [
+                ("Cash", ["cash"]),
+                ("Transfer", ["transfer"]),
+                ("Tmanual ASDP", ["tmanual", "manual asdp", "tiket manual"]),
+                ("Prepaid", ["prepaid"]),
+                ("Go Show", ["go show","go-show","goshows"]),
+                ("Virtual Account dan Gerai Retail", ["virtual account","gerai","retail"]),
+                ("ESPAY", ["espay"]),
+                ("e-Money", ["e-money","emoney","e money"]),
+                ("Online", ["online"]),
+            ]
+            for label, keys in mapping:
+                if any(k in s for k in keys):
+                    return label
+            return "Lainnya"
+
+        tix["__TYPE__"] = tix[type_col].apply(_type_bucket)
+        tix["__BANK__"] = tix[bank_col].apply(_bank_bucket)
+
+        pivot = tix.pivot_table(
+            index=tix[t_date_any].dt.date,
+            columns=["__TYPE__","__BANK__"],
+            values=amt_col,
+            aggfunc="sum",
+            fill_value=0.0,
+        )
+
+        TYPE_ORDER = [
+            "Cash","Transfer","Tmanual ASDP","Prepaid","Go Show",
+            "Virtual Account dan Gerai Retail","ESPAY","e-Money","Online","Lainnya"
+        ]
+        BANK_ORDER = ["BRI","BNI","MANDIRI","BCA","LAINNYA"]
+        full_cols = pd.MultiIndex.from_product([TYPE_ORDER, BANK_ORDER], names=["TYPE","BANK"])
+        pivot = pivot.reindex(columns=full_cols, fill_value=0.0)
+        pivot = pivot.loc[:, (pivot.sum(axis=0) != 0)]
+        pivot.index.name = "Tanggal"
+
+        st.subheader("Detail Tiket per Tanggal — Type × Bank (Tiket Detail)")
+        df2 = pivot.reset_index()
+        df2.insert(0, "NO", range(1, len(df2) + 1))
+
+        # format rupiah hanya untuk kolom numerik
+        from pandas.api.types import is_numeric_dtype
+        df2_fmt = df2.copy()
+        for c in df2_fmt.columns:
+            if c in ("NO", "Tanggal"):
+                continue
+            if is_numeric_dtype(df2_fmt[c]):
+                df2_fmt[c] = df2_fmt[c].apply(_idr_fmt)
+
+        st.dataframe(df2_fmt, use_container_width=True, hide_index=True)
+    else:
+        st.info("Kolom **Type/Bank/Tanggal** tidak lengkap di Tiket Detail, tabel 'Detail Tiket (Type × Bank)' tidak bisa dibuat.")
