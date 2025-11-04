@@ -9,7 +9,7 @@ Rekonsiliasi: Tiket Detail vs Settlement Dana
     * Rekening Koran BCA (CSV/Excel)
     * Rekening Koran Non BCA (CSV/Excel)
 - Parser uang/tanggal robust (format Eropa & serial Excel)
-- Tabel 1: TIKET DETAIL ESPAY hanya status 'PAID' (persis) & Bank mengandung 'ESPAY'
+- Tabel 1: TIKET DETAIL ESPAY diambil dari Action Date + Bank berisi 'ESPAY' + St Bayar = 'PAID'
 """
 
 from __future__ import annotations
@@ -17,6 +17,7 @@ from __future__ import annotations
 import io
 import re
 import calendar
+import unicodedata
 from typing import Optional, List, Tuple
 
 import numpy as np
@@ -59,6 +60,13 @@ def _parse_money(val) -> float:
 
 def _to_num(sr: pd.Series) -> pd.Series:
     return sr.apply(_parse_money).astype(float)
+
+# --- Text normalizer (hapus aksen/diakritik, lowercase) ---
+def _norm_str(val) -> str:
+    s = "" if val is None else str(val)
+    s = unicodedata.normalize("NFKD", s)
+    s = "".join(ch for ch in s if not unicodedata.combining(ch))
+    return s.strip().lower()
 
 # --- Date parser (day-first + Excel serial) ---
 _ddmmyyyy = re.compile(r"\b(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{2,4})\b")
@@ -299,15 +307,14 @@ rk_bca_df  = _concat_files(rk_bca_files)
 rk_non_df  = _concat_rk_non(rk_non_files)   # KHUSUS Non BCA → promote header 13/14
 
 if go:
-    # --- Tiket: dua kandidat kolom tanggal ---
-    t_date_main = _find_col(tiket_df, ["Paid Date","Payment Date","Tanggal Bayar","Tanggal"])
+    # --- Tiket: kolom tanggal UTAMA = Action Date (sesuai permintaan) ---
+    t_date_main = _find_col(tiket_df, ["Action/Action Date","Action Date","Action","Action date"])
+    # Jika benar-benar tidak ada Action Date, hentikan dengan pesan
     if t_date_main is None:
-        t_date_main = _find_col(tiket_df, ["Action/Action Date","Action Date","Action","Action date","Tanggal"])
-    t_date_any = _find_col(tiket_df, [
-        "Action/Action Date","Action Date","Action","Action date",
-        "Paid Date","Payment Date","Tanggal Bayar","Tanggal"
-    ])
+        st.error("Kolom tanggal 'Action Date' tidak ditemukan pada Tiket Detail.")
+        st.stop()
 
+    # Kolom lain dari Tiket Detail
     t_amt  = _find_col(tiket_df, ["tarif","amount","nominal","jumlah","total"])
     t_stat = _find_col(tiket_df, ["St Bayar","Status Bayar","status","status bayar"])
     t_bank = _find_col(tiket_df, ["Bank","Payment Channel","channel","payment method"])
@@ -336,7 +343,7 @@ if go:
     # --- Validasi minimal ---
     missing = []
     for name, col, src in [
-        ("Paid/Payment/Tanggal Bayar", t_date_main, "Tiket Detail (Tabel 1)"),
+        ("Action Date", t_date_main, "Tiket Detail (Tabel 1)"),
         ("tarif/amount", t_amt, "Tiket Detail"),
         ("St Bayar/Status", t_stat, "Tiket Detail"),
         ("Bank/Channel", t_bank, "Tiket Detail"),
@@ -349,15 +356,17 @@ if go:
         st.error("Kolom wajib tidak ditemukan → " + "; ".join(missing))
         st.stop()
 
-    # ------------------  TABEL 1 (TIKET DETAIL ESPAY = PAID SAJA)  ----------------
+    # ------------------  TABEL 1 (Action Date + Bank ESPAY + St Bayar = PAID)  ----------------
     td = tiket_df.copy()
     td[t_date_main] = td[t_date_main].apply(_to_date)
     td = td[~td[t_date_main].isna()]
 
-    td_stat_norm = td[t_stat].astype(str).str.strip().str.lower()
-    td_bank_norm = td[t_bank].astype(str).str.strip().str.lower()
-    paid_mask  = td_stat_norm.eq("paid")  # hanya 'paid' persis
-    espay_mask = td_bank_norm.str.contains("espay", na=False)
+    # Normalisasi teks untuk tahan diakritik (ESPAY vs ËSPAY)
+    td_stat_norm = td[t_stat].apply(_norm_str)
+    td_bank_norm = td[t_bank].apply(_norm_str)
+
+    paid_mask  = td_stat_norm.eq("paid")                   # hanya 'paid' persis
+    espay_mask = td_bank_norm.str.contains("espay", na=False)  # bank mengandung 'espay'
     td = td[paid_mask & espay_mask]
 
     td = td[(td[t_date_main] >= month_start) & (td[t_date_main] <= month_end)]
@@ -544,6 +553,7 @@ if go:
     # ================  TABEL BARU: DETAIL TIKET (TYPE × BANK)  ============
     # ======================================================================
 
+    t_date_any = t_date_main  # bisa pakai Action Date juga untuk tabel 2
     type_col = _find_col(tiket_df, ["Type","Tipe","Jenis","Payment Type","Channel Type","Transaction Type"])
     bank_col = t_bank
     amt_col  = t_amt
@@ -555,7 +565,7 @@ if go:
         tix = tix[(tix[t_date_any] >= month_start) & (tix[t_date_any] <= month_end)]
         if t_stat:
             stat_norm = tix[t_stat].astype(str).str.strip().str.lower()
-            # Tabel 2 tetap longgar (paid/success/sukses/settled/lunas)
+            # Tabel 2 longgar: paid/success/sukses/settled/lunas
             tix = tix[stat_norm.str.contains(r"\bpaid\b|\bsuccess\b|sukses|settled|lunas", na=False)]
         if amt_col:
             tix[amt_col] = _to_num(tix[amt_col])
