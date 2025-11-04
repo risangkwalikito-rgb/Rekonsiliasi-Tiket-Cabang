@@ -286,9 +286,9 @@ with st.sidebar:
     month_end   = pd.Timestamp(y, m, calendar.monthrange(y, m)[1])
     st.caption(f"Periode dipakai: {month_start.date()} s/d {month_end.date()}")
 
-    st.header("3) Opsi")
-    show_preview = st.checkbox("Tampilkan pratinjau", value=False)
-    show_debug   = st.checkbox("Debug parsing", value=False)
+    # 3) Proses — filter disembunyikan
+    show_preview = False
+    show_debug   = False
     go = st.button("Proses", type="primary", use_container_width=True)
 
 tiket_df   = _concat_files(tiket_files)
@@ -447,7 +447,6 @@ if go:
     final["UANG MASUK BCA"]                    = uang_masuk_bca_ser.values
     final["UANG MASUK NON BCA"]                = uang_masuk_non_ser.values
     final["TOTAL UANG MASUK"]                  = total_uang_masuk_ser.values
-    # ➕ Kolom baru:
     final["SELISIH SETTLEMENT - UANG MASUK"]   = final["TOTAL SETTLEMENT"] - final["TOTAL UANG MASUK"]
 
     # -------- View + total (HILANGKAN kolom TANGGAL di kanan; kunci urutan) --------
@@ -468,7 +467,6 @@ if go:
         "UANG MASUK BCA": final["UANG MASUK BCA"].sum(),
         "UANG MASUK NON BCA": final["UANG MASUK NON BCA"].sum(),
         "TOTAL UANG MASUK": final["TOTAL UANG MASUK"].sum(),
-        # ➕ total kolom baru:
         "SELISIH SETTLEMENT - UANG MASUK": final["SELISIH SETTLEMENT - UANG MASUK"].sum(),
     }])
 
@@ -483,7 +481,6 @@ if go:
         "TIKET DETAIL ESPAY", "SETTLEMENT DANA ESPAY", "SELISIH TIKET DETAIL - SETTLEMENT",
         "SETTLEMENT BCA", "SETTLEMENT NON BCA", "TOTAL SETTLEMENT",
         "UANG MASUK BCA", "UANG MASUK NON BCA", "TOTAL UANG MASUK",
-        # ➕ posisi di kanan TOTAL UANG MASUK
         "SELISIH SETTLEMENT - UANG MASUK",
     ]
     view_total = view_total.loc[:, ordered_cols]
@@ -494,7 +491,6 @@ if go:
         "TIKET DETAIL ESPAY","SETTLEMENT DANA ESPAY","SELISIH TIKET DETAIL - SETTLEMENT",
         "SETTLEMENT BCA","SETTLEMENT NON BCA","TOTAL SETTLEMENT",
         "UANG MASUK BCA","UANG MASUK NON BCA","TOTAL UANG MASUK",
-        # ➕ format juga kolom baru
         "SELISIH SETTLEMENT - UANG MASUK",
     ]:
         fmt[c] = fmt[c].apply(_idr_fmt)
@@ -521,7 +517,6 @@ if go:
             "TIKET DETAIL ESPAY", "SETTLEMENT DANA ESPAY", "SELISIH TIKET DETAIL - SETTLEMENT",
             "BCA", "NON BCA", "TOTAL SETTLEMENT",
             "BCA", "NON BCA", "TOTAL UANG MASUK",
-            # ➕ header kolom baru
             "SELISIH SETTLEMENT - UANG MASUK",
         ]
         top_headers = [
@@ -529,7 +524,6 @@ if go:
             "TIKET DETAIL ESPAY", "SETTLEMENT DANA ESPAY", "SELISIH TIKET DETAIL - SETTLEMENT",
             "SETTLEMENT", "SETTLEMENT", "TOTAL SETTLEMENT",
             "UANG MASUK", "UANG MASUK", "TOTAL UANG MASUK",
-            # kolom biasa (tidak dimerge)
             "SELISIH SETTLEMENT - UANG MASUK",
         ]
 
