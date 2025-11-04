@@ -447,6 +447,8 @@ if go:
     final["UANG MASUK BCA"]                    = uang_masuk_bca_ser.values
     final["UANG MASUK NON BCA"]                = uang_masuk_non_ser.values
     final["TOTAL UANG MASUK"]                  = total_uang_masuk_ser.values
+    # ➕ Kolom baru:
+    final["SELISIH SETTLEMENT - UANG MASUK"]   = final["TOTAL SETTLEMENT"] - final["TOTAL UANG MASUK"]
 
     # -------- View + total (HILANGKAN kolom TANGGAL di kanan; kunci urutan) --------
     view = final.reset_index()                     # kolom pertama = index bernama 'Tanggal'
@@ -466,6 +468,8 @@ if go:
         "UANG MASUK BCA": final["UANG MASUK BCA"].sum(),
         "UANG MASUK NON BCA": final["UANG MASUK NON BCA"].sum(),
         "TOTAL UANG MASUK": final["TOTAL UANG MASUK"].sum(),
+        # ➕ total kolom baru:
+        "SELISIH SETTLEMENT - UANG MASUK": final["SELISIH SETTLEMENT - UANG MASUK"].sum(),
     }])
 
     view_total = pd.concat([view, total_row], ignore_index=True)
@@ -479,6 +483,8 @@ if go:
         "TIKET DETAIL ESPAY", "SETTLEMENT DANA ESPAY", "SELISIH TIKET DETAIL - SETTLEMENT",
         "SETTLEMENT BCA", "SETTLEMENT NON BCA", "TOTAL SETTLEMENT",
         "UANG MASUK BCA", "UANG MASUK NON BCA", "TOTAL UANG MASUK",
+        # ➕ posisi di kanan TOTAL UANG MASUK
+        "SELISIH SETTLEMENT - UANG MASUK",
     ]
     view_total = view_total.loc[:, ordered_cols]
 
@@ -487,7 +493,9 @@ if go:
     for c in [
         "TIKET DETAIL ESPAY","SETTLEMENT DANA ESPAY","SELISIH TIKET DETAIL - SETTLEMENT",
         "SETTLEMENT BCA","SETTLEMENT NON BCA","TOTAL SETTLEMENT",
-        "UANG MASUK BCA","UANG MASUK NON BCA","TOTAL UANG MASUK"
+        "UANG MASUK BCA","UANG MASUK NON BCA","TOTAL UANG MASUK",
+        # ➕ format juga kolom baru
+        "SELISIH SETTLEMENT - UANG MASUK",
     ]:
         fmt[c] = fmt[c].apply(_idr_fmt)
 
@@ -513,12 +521,16 @@ if go:
             "TIKET DETAIL ESPAY", "SETTLEMENT DANA ESPAY", "SELISIH TIKET DETAIL - SETTLEMENT",
             "BCA", "NON BCA", "TOTAL SETTLEMENT",
             "BCA", "NON BCA", "TOTAL UANG MASUK",
+            # ➕ header kolom baru
+            "SELISIH SETTLEMENT - UANG MASUK",
         ]
         top_headers = [
             "NO", "TANGGAL",
             "TIKET DETAIL ESPAY", "SETTLEMENT DANA ESPAY", "SELISIH TIKET DETAIL - SETTLEMENT",
             "SETTLEMENT", "SETTLEMENT", "TOTAL SETTLEMENT",
             "UANG MASUK", "UANG MASUK", "TOTAL UANG MASUK",
+            # kolom biasa (tidak dimerge)
+            "SELISIH SETTLEMENT - UANG MASUK",
         ]
 
         for col_idx, (top, sub) in enumerate(zip(top_headers, sub_headers), start=1):
