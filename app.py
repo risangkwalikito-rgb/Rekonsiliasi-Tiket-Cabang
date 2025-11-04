@@ -420,7 +420,7 @@ if go:
             bca = bca[~bca[rk_tgl_bca].isna()]
             bca = bca[(bca[rk_tgl_bca] >= month_start) & (bca[rk_tgl_bca] <= month_end)]
             ket_norm = bca[rk_ket_bca].astype(str).str.strip().str.lower()
-            mrc_mask = ket_norm.str_contains("mrc", na=False)
+            mrc_mask = ket_norm.str.contains("mrc", na=False)   # <<<<< FIXED HERE
             bca = bca[mrc_mask]
             bca[rk_amt_bca] = _to_num(bca[rk_amt_bca])
             uang_masuk_bca = bca.groupby(bca[rk_tgl_bca].dt.date, dropna=True)[rk_amt_bca].sum()
