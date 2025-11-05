@@ -240,8 +240,7 @@ def _expand_zip(files):
                             continue
                         data = zf.read(info)
                         bio = io.BytesIO(data)
-                        # beri atribut .name supaya _read_any tahu ekstensinya
-                        bio.name = f"{f.name}::{inner}"
+                        bio.name = f"{f.name}::{inner}"  # agar _read_any tahu ekstensinya
                         out.append(bio)
             except Exception as e:
                 st.warning(f"Gagal ekstrak ZIP {f.name}: {e}")
@@ -683,6 +682,13 @@ if go:
         st.subheader("Detail Tiket per Tanggal — Type × Bank (Tiket Detail)")
         df2 = pivot.reset_index()
         df2.insert(0, "NO", range(1, len(df2) + 1))
+
+        # >>> Tambah subtotal (TOTAL) di bawah
+        totals = pivot.sum(axis=0)  # jumlah per kolom TYPE×BANK
+        total_row = {"NO": "", "Tanggal": "TOTAL"}
+        for col in pivot.columns:
+            total_row[col] = float(totals.get(col, 0.0))
+        df2 = pd.concat([df2, pd.DataFrame([total_row])], ignore_index=True)
 
         # format rupiah hanya untuk kolom numerik
         from pandas.api.types import is_numeric_dtype
