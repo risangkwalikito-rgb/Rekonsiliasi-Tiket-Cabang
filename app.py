@@ -655,7 +655,10 @@ if go:
         tix = tix[~tix[date_col].isna()]
         tix = tix[(tix[date_col] >= month_start) & (tix[date_col] <= month_end)]
 
-        # TIDAK ada filter ST BAYAR (paid/unpaid semua dihitung)
+        # >>> RUMUS SEMULA: FILTER KETAT hanya 'paid'
+        if t_stat:
+            stat_norm2 = tix[t_stat].apply(_norm_str)
+            tix = tix[stat_norm2 == "paid"]
 
         # Normalisasi teks
         main_norm = tix[type_main_col].apply(_norm_str)   # kolom B
@@ -702,7 +705,7 @@ if go:
             detail_go_show[k] = ser.values
 
         # Tampilkan + subtotal bawah
-        st.subheader("Detail Tiket per Tanggal — TYPE: GO SHOW (B) × SUB-TIPE (J)")
+        st.subheader("Detail Tiket per Tanggal — TYPE: GO SHOW (B) × SUB-TIPE (J) [PAID ONLY]")
         df2 = detail_go_show.reset_index()
         df2.insert(0, "NO", range(1, len(df2) + 1))
 
