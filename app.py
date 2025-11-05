@@ -4,10 +4,10 @@
 Rekonsiliasi: Tiket Detail vs Settlement Dana
 - Parameter tanggal = Bulan & Tahun; hasil selalu 1..akhir bulan itu
 - Multi-file upload:
-    * Tiket Detail (Excel .xls/.xlsx)
-    * Settlement Dana (CSV/Excel)
-    * Rekening Koran BCA (CSV/Excel)
-    * Rekening Koran Non BCA (CSV/Excel)
+    * Tiket Detail (Excel .xls/.xlsx atau .zip berisi .xls/.xlsx/.csv)
+    * Settlement Dana (CSV/Excel atau .zip berisi .xls/.xlsx/.csv)
+    * Rekening Koran BCA (CSV/Excel atau .zip berisi .xls/.xlsx/.csv)
+    * Rekening Koran Non BCA (CSV/Excel atau .zip berisi .xls/.xlsx/.csv)
 - Parser uang/tanggal robust (format Eropa & serial Excel)
 - TABEL 1: TIKET DETAIL ESPAY = SUM(Tarif) dgn Action Date, Bank='ESPAY', St Bayar='paid'
 """
@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import io
 import re
+import zipfile
 import calendar
 import unicodedata
 from typing import Optional, List, Tuple
@@ -211,6 +212,43 @@ def _concat_files(files) -> pd.DataFrame:
             frames.append(df)
     return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
 
+# ==== Ekstraksi ZIP → list file-like (BytesIO) yang punya .name ====
+def _expand_zip(files):
+    """Terima list UploadedFile, kembalikan list file-like:
+       - Jika item .zip → ekstrak file di dalamnya (hanya *.csv, *.xls, *.xlsx)
+       - Jika bukan .zip → tetap dikembalikan
+    """
+    if not files:
+        return []
+    out = []
+    allow_ext = (".csv", ".xls", ".xlsx")
+    for f in files:
+        fname = (f.name or "").lower()
+        if fname.endswith(".zip"):
+            try:
+                f.seek(0)
+                with zipfile.ZipFile(f) as zf:
+                    for info in zf.infolist():
+                        if info.is_dir():
+                            continue
+                        inner = info.filename
+                        inner_lower = inner.lower()
+                        if not inner_lower.endswith(allow_ext):
+                            continue
+                        # abaikan file sistem/mac
+                        if inner_lower.startswith("__macosx/") or inner_lower.endswith(".ds_store"):
+                            continue
+                        data = zf.read(info)
+                        bio = io.BytesIO(data)
+                        # beri atribut .name supaya _read_any tahu ekstensinya
+                        bio.name = f"{f.name}::{inner}"
+                        out.append(bio)
+            except Exception as e:
+                st.warning(f"Gagal ekstrak ZIP {f.name}: {e}")
+        else:
+            out.append(f)
+    return out
+
 # ==== KHUSUS RK NON BCA: angkat baris 13/14 menjadi header bila perlu ====
 def _promote_header(df: pd.DataFrame) -> pd.DataFrame:
     if df.empty:
@@ -283,12 +321,13 @@ st.title("Rekonsiliasi: Tiket Detail vs Settlement Dana")
 
 with st.sidebar:
     st.header("1) Upload Sumber (multi-file)")
-    tiket_files = st.file_uploader("Tiket Detail (Excel .xls/.xlsx)", type=["xls","xlsx"], accept_multiple_files=True)
-    settle_files = st.file_uploader("Settlement Dana (CSV/Excel)", type=["csv","xls","xlsx"], accept_multiple_files=True)
+    # Tambahkan 'zip' di semua uploader yang relevan
+    tiket_files = st.file_uploader("Tiket Detail (Excel .xls/.xlsx/.zip)", type=["xls","xlsx","zip"], accept_multiple_files=True)
+    settle_files = st.file_uploader("Settlement Dana (CSV/Excel/.zip)", type=["csv","xls","xlsx","zip"], accept_multiple_files=True)
     st.divider()
     st.header("Rekening Koran (opsional, multi-file)")
-    rk_bca_files = st.file_uploader("Rekening Koran BCA (CSV/Excel)", type=["csv","xls","xlsx"], accept_multiple_files=True)
-    rk_non_files = st.file_uploader("Rekening Koran Non BCA (CSV/Excel)", type=["csv","xls","xlsx"], accept_multiple_files=True)
+    rk_bca_files = st.file_uploader("Rekening Koran BCA (CSV/Excel/.zip)", type=["csv","xls","xlsx","zip"], accept_multiple_files=True)
+    rk_non_files = st.file_uploader("Rekening Koran Non BCA (CSV/Excel/.zip)", type=["csv","xls","xlsx","zip"], accept_multiple_files=True)
 
     st.header("2) Parameter Bulan & Tahun (WAJIB)")
     y, m = _month_selector()
@@ -301,10 +340,16 @@ with st.sidebar:
     show_debug   = False
     go = st.button("Proses", type="primary", use_container_width=True)
 
-tiket_df   = _concat_files(tiket_files)
-settle_df  = _concat_files(settle_files)
-rk_bca_df  = _concat_files(rk_bca_files)
-rk_non_df  = _concat_rk_non(rk_non_files)   # KHUSUS Non BCA → promote header 13/14
+# ==== Ekspansi ZIP sebelum dibaca ====
+tiket_inputs  = _expand_zip(tiket_files)
+settle_inputs = _expand_zip(settle_files)
+rk_bca_inputs = _expand_zip(rk_bca_files)
+rk_non_inputs = _expand_zip(rk_non_files)
+
+tiket_df   = _concat_files(tiket_inputs)
+settle_df  = _concat_files(settle_inputs)
+rk_bca_df  = _concat_files(rk_bca_inputs)
+rk_non_df  = _concat_rk_non(rk_non_inputs)   # KHUSUS Non BCA → promote header 13/14
 
 if go:
     # ---------------------- Tiket Detail (TABEL 1) ----------------------
@@ -560,7 +605,7 @@ if go:
 
     st.download_button(
         "Unduh Excel",
-        data=bio.getvalue(),  # perbaikan: getvalue()
+        data=bio.getvalue(),  # penting: getvalue() bukan get_value()
         file_name=f"rekonsiliasi_{y}-{m:02d}.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         use_container_width=True,
