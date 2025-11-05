@@ -610,8 +610,8 @@ if go:
         use_container_width=True,
     )
 
-          # ======================================================================
-    # ===========  TABEL BARU: DETAIL TIKET (GO SHOW × SUB-KATEGORI)  ======
+         # ======================================================================
+    # ===========  TABEL BARU: DETAIL TIKET (GO SHOW & ONLINE)  ============
     # ======================================================================
 
     # Helper: ambil nama kolom berdasarkan huruf (A..Z, AA..)
@@ -669,20 +669,18 @@ if go:
         tix[tarif_col] = _to_num(tix[tarif_col])
 
         # Mask Type
-        m_go_show = main_norm.str.fullmatch(r"go\s*show", case=False, na=False) | main_norm.str.contains(r"\bgo\s*show\b", na=False)
-        m_online  = main_norm.str.fullmatch(r"online", case=False, na=False)   | main_norm.str.contains(r"\bonline\b",    na=False)
+        m_go_show = (main_norm == "go show") | main_norm.str.contains(r"\bgo\s*show\b", na=False)
+        m_online  = (main_norm == "online")  | main_norm.str.contains(r"\bonline\b",    na=False)
 
         # Mask Sub-Tipe
-        m_prepaid  = sub_norm.str.fullmatch(r"prepaid", na=False) | sub_norm.str.contains(r"\bprepaid\b", na=False)
-        m_emoney   = sub_norm.str.fullmatch(r"e[\-\s]*money", na=False) | sub_norm.str.contains(r"\be[\-\s]*money\b|\bemoney\b", na=False)
-        m_varetail = (
-            sub_norm.str.fullmatch(r"virtual account dan gerai retail", na=False) |
-            sub_norm.str.contains(r"virtual\s*account", na=False)
-        ) & sub_norm.str.contains(r"gerai|retail", na=False)
+        m_prepaid  = (sub_norm == "prepaid") | sub_norm.str.contains(r"\bprepaid\b", na=False)
+        m_emoney   = (sub_norm == "e-money") | sub_norm.str.contains(r"\be[-\s]*money\b|\bemoney\b", na=False)
+        m_varetail = sub_norm.str.contains(r"virtual\s*account", na=False) & sub_norm.str.contains(r"gerai|retail", na=False)
+
+        idx2 = pd.Index(pd.date_range(month_start, month_end, freq="D").date, name="Tanggal")
 
         # ================= GO SHOW =================
         tix_gs = tix.loc[m_go_show].drop_duplicates(subset=[date_col, type_main_col, type_sub_col, bank_col, tarif_col])
-
         s_gs_prepaid_bca     = tix_gs.loc[m_prepaid  & (bank_norm == "bca")    ].groupby(tix_gs[date_col].dt.date, dropna=True)[tarif_col].sum()
         s_gs_prepaid_bri     = tix_gs.loc[m_prepaid  & (bank_norm == "bri")    ].groupby(tix_gs[date_col].dt.date, dropna=True)[tarif_col].sum()
         s_gs_prepaid_bni     = tix_gs.loc[m_prepaid  & (bank_norm == "bni")    ].groupby(tix_gs[date_col].dt.date, dropna=True)[tarif_col].sum()
@@ -690,18 +688,6 @@ if go:
         s_gs_emoney_espay    = tix_gs.loc[m_emoney   & (bank_norm == "espay")  ].groupby(tix_gs[date_col].dt.date, dropna=True)[tarif_col].sum()
         s_gs_varetail_espay  = tix_gs.loc[m_varetail & (bank_norm == "espay")  ].groupby(tix_gs[date_col].dt.date, dropna=True)[tarif_col].sum()
 
-        # ================= ONLINE =================
-        # Khusus ONLINE: Bank harus ESPAY
-        tix_on = tix.loc[m_online & (bank_norm == "espay")].drop_duplicates(subset=[date_col, type_main_col, type_sub_col, bank_col, tarif_col])
-
-        s_on_emoney_espay   = tix_on.loc[m_emoney  ].groupby(tix_on[date_col].dt.date, dropna=True)[tarif_col].sum()
-        s_on_varetail_espay = tix_on.loc[m_varetail].groupby(tix_on[date_col].dt.date, dropna=True)[tarif_col].sum()
-
-        # Reindex ke kalender bulan
-        idx2 = pd.Index(pd.date_range(month_start, month_end, freq="D").date, name="Tanggal")
-
-        # Pakai key unik sementara supaya tidak tabrakan nama kolom,
-        # lalu MultiIndex akan menaruhnya di bawah "GO SHOW" dan "ONLINE"
         go_show_cols = {
             "GS|PREPAID - BCA":     s_gs_prepaid_bca.reindex(idx2, fill_value=0.0),
             "GS|PREPAID - BRI":     s_gs_prepaid_bri.reindex(idx2, fill_value=0.0),
@@ -710,40 +696,47 @@ if go:
             "GS|E-MONEY - ESPAY":   s_gs_emoney_espay.reindex(idx2, fill_value=0.0),
             "GS|VIRTUAL ACCOUNT DAN GERAI RETAIL - ESPAY": s_gs_varetail_espay.reindex(idx2, fill_value=0.0),
         }
+
+        # ================= ONLINE (IKUTI RUMUS SEBELUMNYA) =================
+        tix_on = tix.loc[m_online].copy()
+        tix_on = tix_on.drop_duplicates(subset=[date_col, type_main_col, type_sub_col, bank_col, tarif_col])
+        sub_on  = tix_on[type_sub_col].apply(_norm_str)
+        bank_on = tix_on[bank_col].apply(_norm_str)
+        m_emoney_on   = ((sub_on == "e-money") | sub_on.str.contains(r"\be[-\s]*money\b|\bemoney\b", na=False))
+        m_varetail_on = sub_on.str.contains(r"virtual\s*account", na=False) & sub_on.str.contains(r"gerai|retail", na=False)
+        m_bank_espay_on = (bank_on == "espay")
+        s_on_emoney_espay   = tix_on.loc[m_bank_espay_on & m_emoney_on]  .groupby(tix_on[date_col].dt.date, dropna=True)[tarif_col].sum()
+        s_on_varetail_espay = tix_on.loc[m_bank_espay_on & m_varetail_on].groupby(tix_on[date_col].dt.date, dropna=True)[tarif_col].sum()
         online_cols = {
-            "ON|E-MONEY - ESPAY":                      s_on_emoney_espay.reindex(idx2, fill_value=0.0),
+            "ON|E-MONEY - ESPAY":                        s_on_emoney_espay.reindex(idx2, fill_value=0.0),
             "ON|VIRTUAL ACCOUNT & GERAI RETAIL - ESPAY": s_on_varetail_espay.reindex(idx2, fill_value=0.0),
         }
 
+        # Build wide table + subtotal + MultiIndex header
         detail_mix = pd.DataFrame(index=idx2)
         for k, ser in {**go_show_cols, **online_cols}.items():
             detail_mix[k] = ser.values
 
-        # ===== Tampilkan dengan MERGED HEADER "GO SHOW" dan "ONLINE" =====
         st.subheader("Detail Tiket per Tanggal — TYPE: GO SHOW & ONLINE × SUB-TIPE (J) [SEMUA STATUS]")
         df2 = detail_mix.reset_index()
         df2.insert(0, "NO", range(1, len(df2) + 1))
 
-        # Subtotal (TOTAL)
         total_row = {"NO": "", "Tanggal": "TOTAL"}
         for k in detail_mix.columns:
             total_row[k] = float(detail_mix[k].sum())
         df2 = pd.concat([df2, pd.DataFrame([total_row])], ignore_index=True)
 
-        # Format rupiah untuk kolom numerik
         from pandas.api.types import is_numeric_dtype
         df2_fmt = df2.copy()
         for c in df2_fmt.columns:
-            if c in ("NO", "Tanggal"):
+            if c in ("NO", "Tanggal"): 
                 continue
             if is_numeric_dtype(df2_fmt[c]):
                 df2_fmt[c] = df2_fmt[c].apply(_idr_fmt)
 
-        # Siapkan MultiIndex header
         def _strip_prefix(col_name: str) -> str:
             return col_name.split("|", 1)[1] if "|" in col_name else col_name
 
-        # urutan kolom final: NO, Tanggal, GO SHOW..., ONLINE...
         ordered_keys = list(go_show_cols.keys()) + list(online_cols.keys())
         df2_fmt = df2_fmt[["NO", "Tanggal"] + ordered_keys]
 
