@@ -610,87 +610,86 @@ if go:
         use_container_width=True,
     )
 
-    # ======================================================================
-    # ================  TABEL BARU: DETAIL TIKET (TYPE × BANK)  ============
+     # ======================================================================
+    # ===========  TABEL BARU: DETAIL TIKET (GO SHOW × SUB-KATEGORI)  ======
     # ======================================================================
 
-    # Untuk tabel 2, gunakan Action Date juga sebagai tanggal
-    t_date_any = t_date_action
-    type_col = _find_col(tiket_df, ["Type","Tipe","Jenis","Payment Type","Channel Type","Transaction Type"])
-    bank_col = t_bank
-    # Untuk tabel 2 nominal bisa pakai kolom umum (fallback jika ada)
-    t_amt_any = _find_col(tiket_df, ["tarif","amount","nominal","jumlah","total"])
+    # Sumber kolom
+    t_date_any = t_date_action                      # tanggal = Action Date (sudah divalidasi di atas)
+    type_col   = _find_col(tiket_df, ["Type","Tipe","Jenis","Payment Type","Channel Type","Transaction Type"])
+    bank_col   = t_bank
+    t_amt_any  = _find_col(tiket_df, ["tarif","amount","nominal","jumlah","total"])
 
     if type_col and bank_col and t_date_any and t_amt_any:
         tix = tiket_df.copy()
         tix[t_date_any] = tix[t_date_any].apply(_to_date)
         tix = tix[~tix[t_date_any].isna()]
         tix = tix[(tix[t_date_any] >= month_start) & (tix[t_date_any] <= month_end)]
+
+        # filter status untuk tabel detail juga (paid/success/sukses/settled/lunas)
         if t_stat:
-            stat_norm = tix[t_stat].astype(str).str.strip().str.lower()
-            # Tabel 2 longgar: paid/success/sukses/settled/lunas
-            tix = tix[stat_norm.str.contains(r"\bpaid\b|\bsuccess\b|sukses|settled|lunas", na=False)]
+            stat_norm2 = tix[t_stat].astype(str).str.strip().str.lower()
+            tix = tix[stat_norm2.str.contains(r"\bpaid\b|\bsuccess\b|sukses|settled|lunas", na=False)]
+
+        # normalisasi teks
+        type_norm = tix[type_col].apply(_norm_str)
+        bank_norm = tix[bank_col].apply(_norm_str)
+
+        # nominal
         tix[t_amt_any] = _to_num(tix[t_amt_any])
 
-        def _bank_bucket(s: str) -> str:
-            s = str(s).strip().lower()
-            if "bri" in s: return "BRI"
-            if "bni" in s: return "BNI"
-            if "mandiri" in s: return "MANDIRI"
-            if "bca" in s: return "BCA"
-            return "LAINNYA"
+        # helper sum per tanggal
+        def _sum_by_date(mask: pd.Series) -> pd.Series:
+            sub = tix[mask]
+            if sub.empty:
+                return pd.Series(dtype=float)
+            return sub.groupby(tix[t_date_any].dt.date, dropna=True)[t_amt_any].sum()
 
-        def _type_bucket(s: str) -> str:
-            s = str(s).strip().lower()
-            mapping = [
-                ("Cash", ["cash"]),
-                ("Transfer", ["transfer"]),
-                ("Tmanual ASDP", ["tmanual", "manual asdp", "tiket manual"]),
-                ("Prepaid", ["prepaid"]),
-                ("Go Show", ["go show","go-show","goshows"]),
-                ("Virtual Account dan Gerai Retail", ["virtual account","gerai","retail"]),
-                ("ESPAY", ["espay"]),
-                ("e-Money", ["e-money","emoney","e money"]),
-                ("Online", ["online"]),
-            ]
-            for label, keys in mapping:
-                if any(k in s for k in keys):
-                    return label
-            return "Lainnya"
+        # Mask untuk TYPE: GO SHOW
+        m_go_show = type_norm.str.contains(r"\bgo\s*show\b", na=False)
 
-        tix["__TYPE__"] = tix[type_col].apply(_type_bucket)
-        tix["__BANK__"] = tix[bank_col].apply(_bank_bucket)
+        # Sub-kelompok: PREPAID (per bank)
+        m_prepaid = type_norm.str.contains(r"\bprepaid\b", na=False)
+        s_prepaid_bca     = _sum_by_date(m_go_show & m_prepaid & bank_norm.str.contains(r"\bbca\b", na=False))
+        s_prepaid_bri     = _sum_by_date(m_go_show & m_prepaid & bank_norm.str.contains(r"\bbri\b", na=False))
+        s_prepaid_bni     = _sum_by_date(m_go_show & m_prepaid & bank_norm.str.contains(r"\bbni\b", na=False))
+        s_prepaid_mandiri = _sum_by_date(m_go_show & m_prepaid & bank_norm.str.contains(r"\bmandiri\b", na=False))
 
-        pivot = tix.pivot_table(
-            index=tix[t_date_any].dt.date,
-            columns=["__TYPE__","__BANK__"],
-            values=t_amt_any,
-            aggfunc="sum",
-            fill_value=0.0,
-        )
+        # Sub-kelompok: E-Money (ESPAY)
+        m_emoney = type_norm.str.contains(r"\be[\-\s]*money\b|\bemoney\b", na=False)
+        s_emoney_espay = _sum_by_date(m_go_show & m_emoney & bank_norm.str.contains(r"\bespay\b", na=False))
 
-        TYPE_ORDER = [
-            "Cash","Transfer","Tmanual ASDP","Prepaid","Go Show",
-            "Virtual Account dan Gerai Retail","ESPAY","e-Money","Online","Lainnya"
-        ]
-        BANK_ORDER = ["BRI","BNI","MANDIRI","BCA","LAINNYA"]
-        full_cols = pd.MultiIndex.from_product([TYPE_ORDER, BANK_ORDER], names=["TYPE","BANK"])
-        pivot = pivot.reindex(columns=full_cols, fill_value=0.0)
-        pivot = pivot.loc[:, (pivot.sum(axis=0) != 0)]
-        pivot.index.name = "Tanggal"
+        # Sub-kelompok: Virtual Account dan Gerai Retail (ESPAY)
+        m_varetail = type_norm.str.contains(r"virtual\s*account|gerai|retail", na=False)
+        s_varetail_espay = _sum_by_date(m_go_show & m_varetail & bank_norm.str.contains(r"\bespay\b", na=False))
 
-        st.subheader("Detail Tiket per Tanggal — Type × Bank (Tiket Detail)")
-        df2 = pivot.reset_index()
+        # Reindex ke kalender bulan
+        idx2 = pd.Index(pd.date_range(month_start, month_end, freq="D").date, name="Tanggal")
+        col_series = {
+            "PREPAID - BCA":     s_prepaid_bca.reindex(idx2, fill_value=0.0),
+            "PREPAID - BRI":     s_prepaid_bri.reindex(idx2, fill_value=0.0),
+            "PREPAID - BNI":     s_prepaid_bni.reindex(idx2, fill_value=0.0),
+            "PREPAID - MANDIRI": s_prepaid_mandiri.reindex(idx2, fill_value=0.0),
+            "E-MONEY - ESPAY":   s_emoney_espay.reindex(idx2, fill_value=0.0),
+            "VIRTUAL ACCOUNT DAN GERAI RETAIL - ESPAY": s_varetail_espay.reindex(idx2, fill_value=0.0),
+        }
+
+        detail_go_show = pd.DataFrame(index=idx2)
+        for k, ser in col_series.items():
+            detail_go_show[k] = ser.values
+
+        # Tampilkan + subtotal bawah
+        st.subheader("Detail Tiket per Tanggal — Type GO SHOW (Sub-kategori)")
+        df2 = detail_go_show.reset_index()
         df2.insert(0, "NO", range(1, len(df2) + 1))
 
-        # >>> Tambah subtotal (TOTAL) di bawah
-        totals = pivot.sum(axis=0)  # jumlah per kolom TYPE×BANK
+        # subtotal (TOTAL)
         total_row = {"NO": "", "Tanggal": "TOTAL"}
-        for col in pivot.columns:
-            total_row[col] = float(totals.get(col, 0.0))
+        for k in col_series.keys():
+            total_row[k] = float(detail_go_show[k].sum())
         df2 = pd.concat([df2, pd.DataFrame([total_row])], ignore_index=True)
 
-        # format rupiah hanya untuk kolom numerik
+        # format rupiah
         from pandas.api.types import is_numeric_dtype
         df2_fmt = df2.copy()
         for c in df2_fmt.columns:
@@ -701,4 +700,4 @@ if go:
 
         st.dataframe(df2_fmt, use_container_width=True, hide_index=True)
     else:
-        st.info("Kolom **Type/Bank/Tanggal/Nominal** tidak lengkap di Tiket Detail, tabel 'Detail Tiket (Type × Bank)' tidak bisa dibuat.")
+        st.info("Kolom **Type/Bank/Tanggal/Nominal** tidak lengkap di Tiket Detail, tabel 'Detail Tiket (GO SHOW)' tidak bisa dibuat.")
