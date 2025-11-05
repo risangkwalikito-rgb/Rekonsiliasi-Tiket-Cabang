@@ -609,25 +609,27 @@ if go:
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         use_container_width=True,
     )
-      # ======================================================================
+        # ======================================================================
     # ===========  TABEL BARU: DETAIL TIKET (GO SHOW × SUB-KATEGORI)  ======
     # ======================================================================
 
-    # Helper: ambil kolom berdasarkan huruf (A..Z, AA..)
+    # Helper: ambil nama kolom berdasarkan huruf (A..Z, AA..)
     def _col_by_letter_local(df: pd.DataFrame, letters: str) -> Optional[str]:
         if df is None or df.empty:
             return None
         s = letters.strip().upper()
-        if not s: return None
+        if not s:
+            return None
         n = 0
         for ch in s:
-            if not ("A" <= ch <= "Z"): return None
+            if not ("A" <= ch <= "Z"):
+                return None
             n = n * 26 + (ord(ch) - ord("A") + 1)
         idx = n - 1
         return df.columns[idx] if 0 <= idx < len(df.columns) else None
 
-    # Sumber kolom (pakai header kalau ada; fallback ke posisi huruf)
-    type_main_col = _find_col(tiket_df, ["Type","Tipe","Jenis"]) or _col_by_letter_local(tiket_df, "B")   # GO SHOW / ONLINE
+    # Kolom sumber (pakai nama header kalau ada; fallback ke huruf kolom)
+    type_main_col = _find_col(tiket_df, ["Type","Tipe","Jenis"]) or _col_by_letter_local(tiket_df, "B")
     bank_col      = _find_col(tiket_df, ["Bank","Payment Channel","channel","payment method"]) or _col_by_letter_local(tiket_df, "I")
     type_sub_col  = (
         _find_col(tiket_df, [
@@ -641,7 +643,7 @@ if go:
     required_missing = [n for n, c in [
         ("TYPE (kolom B)", type_main_col),
         ("BANK (kolom I)", bank_col),
-        ("TIPE / SUB-TIPE (kolom J)", type_sub_col),
+        ("TIPE / SUB-TYPE (kolom J)", type_sub_col),
         ("ACTION DATE (kolom AG)", date_col),
         ("TARIF (kolom Y)", tarif_col),
     ] if c is None]
@@ -650,44 +652,45 @@ if go:
         st.warning("Kolom wajib untuk tabel 'Detail Tiket (GO SHOW)' belum lengkap: " + ", ".join(required_missing))
     else:
         tix = tiket_df.copy()
-        # Tanggal dari kolom AG
+        # Parse tanggal dari kolom AG
         tix[date_col] = tix[date_col].apply(_to_date)
         tix = tix[~tix[date_col].isna()]
         tix = tix[(tix[date_col] >= month_start) & (tix[date_col] <= month_end)]
 
-        # >>> RUMUS SEMULA: FILTER KETAT hanya 'paid'
+        # Filter status (paid/success/sukses/settled/lunas) agar konsisten
         if t_stat:
-            stat_norm2 = tix[t_stat].apply(_norm_str)
-            tix = tix[stat_norm2 == "paid"]
+            stat_norm2 = tix[t_stat].astype(str).str.strip().str.lower()
+            tix = tix[stat_norm2.str.contains(r"\bpaid\b|\bsuccess\b|sukses|settled|lunas", na=False)]
 
-        # Normalisasi teks
-        main_norm = tix[type_main_col].apply(_norm_str)   # kolom B
-        sub_norm  = tix[type_sub_col].apply(_norm_str)    # kolom J
+        # Normalisasi teks pembanding
+        main_norm = tix[type_main_col].apply(_norm_str)  # kolom B
+        sub_norm  = tix[type_sub_col].apply(_norm_str)   # kolom J
         bank_norm = tix[bank_col].apply(_norm_str)
 
         # Amount dari kolom Y = Tarif
         tix[tarif_col] = _to_num(tix[tarif_col])
 
         # Hanya TYPE: GO SHOW (kolom B)
-        m_go_show = (main_norm == "go show") | main_norm.str.contains(r"\bgo\s*show\b", na=False)
-
-        # Dedup (hindari dobel hitung saat multi-file)
-        tix = tix.loc[m_go_show].drop_duplicates(subset=[date_col, type_main_col, type_sub_col, bank_col, tarif_col])
+        m_go_show = main_norm.str.fullmatch(r"go\s*show", case=False, na=False) | main_norm.str.contains(r"\bgo\s*show\b", na=False)
 
         # --- PREPAID (kolom J) per bank ---
-        m_prepaid = (sub_norm == "prepaid") | sub_norm.str.contains(r"\bprepaid\b", na=False)
-        s_prepaid_bca     = tix.loc[m_prepaid & (bank_norm == "bca")     ].groupby(tix[date_col].dt.date, dropna=True)[tarif_col].sum()
-        s_prepaid_bri     = tix.loc[m_prepaid & (bank_norm == "bri")     ].groupby(tix[date_col].dt.date, dropna=True)[tarif_col].sum()
-        s_prepaid_bni     = tix.loc[m_prepaid & (bank_norm == "bni")     ].groupby(tix[date_col].dt.date, dropna=True)[tarif_col].sum()
-        s_prepaid_mandiri = tix.loc[m_prepaid & (bank_norm == "mandiri") ].groupby(tix[date_col].dt.date, dropna=True)[tarif_col].sum()
+        m_prepaid = sub_norm.str.fullmatch(r"prepaid", na=False) | sub_norm.str.contains(r"\bprepaid\b", na=False)
+        s_prepaid_bca = tix.loc[m_go_show & m_prepaid & bank_norm.str.fullmatch(r"bca", na=False)].groupby(tix[date_col].dt.date, dropna=True)[tarif_col].sum()
+        s_prepaid_bri = tix.loc[m_go_show & m_prepaid & bank_norm.str.fullmatch(r"bri", na=False)].groupby(tix[date_col].dt.date, dropna=True)[tarif_col].sum()
+        s_prepaid_bni = tix.loc[m_go_show & m_prepaid & bank_norm.str.fullmatch(r"bni", na=False)].groupby(tix[date_col].dt.date, dropna=True)[tarif_col].sum()
+        s_prepaid_mandiri = tix.loc[m_go_show & m_prepaid & bank_norm.str.fullmatch(r"mandiri", na=False)].groupby(tix[date_col].dt.date, dropna=True)[tarif_col].sum()
 
         # --- E-Money (kolom J) – ESPAY ---
-        m_emoney = (sub_norm == "e-money") | sub_norm.str.fullmatch(r"e[-\s]*money", na=False) | sub_norm.str.contains(r"\be[-\s]*money\b|\bemoney\b", na=False)
-        s_emoney_espay = tix.loc[m_emoney & (bank_norm == "espay")].groupby(tix[date_col].dt.date, dropna=True)[tarif_col].sum()
+        m_emoney = sub_norm.str.fullmatch(r"e[\-\s]*money", na=False) | sub_norm.str.contains(r"\be[\-\s]*money\b|\bemoney\b", na=False)
+        s_emoney_espay = tix.loc[m_go_show & m_emoney & bank_norm.str.fullmatch(r"espay", na=False)].groupby(tix[date_col].dt.date, dropna=True)[tarif_col].sum()
 
         # --- Virtual Account & Gerai Retail (kolom J) – ESPAY ---
-        m_varetail = (sub_norm == "virtual account dan gerai retail") | sub_norm.str.contains(r"virtual\s*account.*(gerai|retail)", na=False)
-        s_varetail_espay = tix.loc[m_varetail & (bank_norm == "espay")].groupby(tix[date_col].dt.date, dropna=True)[tarif_col].sum()
+        # Cocokkan frasa lengkap atau potongan kata kunci
+        m_varetail = (
+            sub_norm.str.fullmatch(r"virtual account dan gerai retail", na=False) |
+            sub_norm.str.contains(r"virtual\s*account", na=False)
+        ) & sub_norm.str.contains(r"gerai|retail", na=False)
+        s_varetail_espay = tix.loc[m_go_show & m_varetail & bank_norm.str.fullmatch(r"espay", na=False)].groupby(tix[date_col].dt.date, dropna=True)[tarif_col].sum()
 
         # Reindex ke kalender bulan
         idx2 = pd.Index(pd.date_range(month_start, month_end, freq="D").date, name="Tanggal")
@@ -705,7 +708,7 @@ if go:
             detail_go_show[k] = ser.values
 
         # Tampilkan + subtotal bawah
-        st.subheader("Detail Tiket per Tanggal — TYPE: GO SHOW (B) × SUB-TIPE (J) [PAID ONLY]")
+        st.subheader("Detail Tiket per Tanggal — TYPE: GO SHOW (kolom B) × SUB-TIPE (kolom J)")
         df2 = detail_go_show.reset_index()
         df2.insert(0, "NO", range(1, len(df2) + 1))
 
