@@ -610,7 +610,7 @@ if go:
         use_container_width=True,
     )
 
-       # ======================================================================
+          # ======================================================================
     # ===========  TABEL BARU: DETAIL TIKET (GO SHOW × SUB-KATEGORI)  ======
     # ======================================================================
 
@@ -644,7 +644,7 @@ if go:
     required_missing = [n for n, c in [
         ("TYPE (kolom B)", type_main_col),
         ("BANK (kolom I)", bank_col),
-        ("TIPE / SUB-TYPE (kolom J)", type_sub_col),
+        ("TIPE / SUB-TIPE (kolom J)", type_sub_col),
         ("ACTION DATE (kolom AG)", date_col),
         ("TARIF (kolom Y)", tarif_col),
     ] if c is None]
@@ -706,7 +706,7 @@ if go:
         for k, ser in col_series.items():
             detail_go_show[k] = ser.values
 
-        # Tampilkan + subtotal bawah
+        # === Tampilkan dengan MERGED HEADER "GO SHOW" (pakai MultiIndex kolom) ===
         st.subheader("Detail Tiket per Tanggal — TYPE: GO SHOW (B) × SUB-TIPE (J) [SEMUA STATUS]")
         df2 = detail_go_show.reset_index()
         df2.insert(0, "NO", range(1, len(df2) + 1))
@@ -726,4 +726,9 @@ if go:
             if is_numeric_dtype(df2_fmt[c]):
                 df2_fmt[c] = df2_fmt[c].apply(_idr_fmt)
 
-        st.dataframe(df2_fmt, use_container_width=True, hide_index=True)
+        # Buat MultiIndex header: baris atas "GO SHOW" untuk kolom-kolom data
+        top = [("", "NO"), ("", "Tanggal")] + [("GO SHOW", k) for k in col_series.keys()]
+        df2_fmt_mi = df2_fmt.copy()
+        df2_fmt_mi.columns = pd.MultiIndex.from_tuples(top)
+
+        st.dataframe(df2_fmt_mi, use_container_width=True, hide_index=True)
