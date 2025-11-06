@@ -610,7 +610,7 @@ if go:
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         use_container_width=True,
     )
-               # ======================================================================
+                  # ======================================================================
     # ===========  TABEL BARU: DETAIL TIKET (GO SHOW × SUB-KATEGORI)  ======
     # ======================================================================
 
@@ -709,9 +709,8 @@ if go:
         on_sub  = sub_norm_all
         on_bank = bank_norm_all
 
-        m_emoney_on    = ((on_sub == "e-money") | on_sub.str.contains(r"\be[-\s]*money\b|\bemoney\b", na=False))
-        # >>> perbaikan typo di sini: str.contains (BUKAN str_contains)
-        m_varetail_on  = on_sub.str.contains(r"virtual\s*account", na=False) & on_sub.str.contains(r"gerai|retail", na=False)
+        m_emoney_on     = ((on_sub == "e-money") | on_sub.str.contains(r"\be[-\s]*money\b|\bemoney\b", na=False))
+        m_varetail_on   = on_sub.str.contains(r"virtual\s*account", na=False) & on_sub.str.contains(r"gerai|retail", na=False)
         m_bank_espay_on = (on_bank == "espay")
 
         s_on_emoney_espay   = on.loc[m_online & m_bank_espay_on & m_emoney_on]  .groupby(on[date_col].dt.date, dropna=True)[tarif_col].sum()
@@ -722,26 +721,29 @@ if go:
             "VIRTUAL ACCOUNT & GERAI RETAIL - ESPAY": s_on_varetail_espay.reindex(idx2, fill_value=0.0),
         }
 
-        # ===== Gabungkan + SUBTOTAL per grup =====
+        # ===== Gabungkan + SUBTOTAL per grup + GRAND TOTAL =====
         detail_mix = pd.DataFrame(index=idx2)
 
         # Tambah kolom GO SHOW
         for k, ser in go_show_cols.items():
             detail_mix[f"GS|{k}"] = ser.values
         # Subtotal GO SHOW (per tanggal)
-        gs_df  = pd.DataFrame(go_show_cols, index=idx2)
-        gs_subtotal = gs_df.sum(axis=1) if not gs_df.empty else pd.Series(0.0, index=idx2)
+        gs_df        = pd.DataFrame(go_show_cols, index=idx2)
+        gs_subtotal  = gs_df.sum(axis=1) if not gs_df.empty else pd.Series(0.0, index=idx2)
         detail_mix["GS|SUBTOTAL"] = gs_subtotal.values
 
         # Tambah kolom ONLINE
         for k, ser in online_cols.items():
             detail_mix[f"ON|{k}"] = ser.values
         # Subtotal ONLINE (per tanggal)
-        on_df  = pd.DataFrame(online_cols, index=idx2)
-        on_subtotal = on_df.sum(axis=1) if not on_df.empty else pd.Series(0.0, index=idx2)
+        on_df        = pd.DataFrame(online_cols, index=idx2)
+        on_subtotal  = on_df.sum(axis=1) if not on_df.empty else pd.Series(0.0, index=idx2)
         detail_mix["ON|SUBTOTAL"] = on_subtotal.values
 
-        # === Render dengan header bertingkat: GO SHOW | ONLINE ===
+        # GRAND TOTAL = SUBTOTAL GO SHOW + SUBTOTAL ONLINE (per tanggal)
+        detail_mix["GT|GRAND TOTAL"] = detail_mix["GS|SUBTOTAL"] + detail_mix["ON|SUBTOTAL"]
+
+        # === Render dengan header bertingkat: GO SHOW | ONLINE | GRAND TOTAL ===
         st.subheader("Detail Tiket per Tanggal — TYPE: GO SHOW & ONLINE × SUB-TIPE (J) [SEMUA STATUS]")
         df2 = detail_mix.reset_index()
         df2.insert(0, "NO", range(1, len(df2) + 1))
@@ -759,19 +761,23 @@ if go:
                 continue
             df2_fmt[c] = df2_fmt[c].apply(_idr_fmt)
 
-        # MultiIndex columns: ("GO SHOW", ...), ("ONLINE", ...)
+        # MultiIndex columns: ("GO SHOW", ...), ("ONLINE", ...), ("GRAND TOTAL", <merged 2 baris>)
         def _strip_prefix(col_name: str) -> tuple[str, str]:
             if col_name.startswith("GS|"):
                 return ("GO SHOW", col_name[3:])
             if col_name.startswith("ON|"):
                 return ("ONLINE", col_name[3:])
+            if col_name.startswith("GT|"):
+                # header 2 baris 'merged' untuk GRAND TOTAL (baris bawah kosong)
+                return ("GRAND TOTAL", "")
             return ("", col_name)
 
-        # urutan: NO, Tanggal, GO SHOW..., GS SUBTOTAL, ONLINE..., ON SUBTOTAL
+        # urutan: NO, Tanggal, GO SHOW..., GS SUBTOTAL, ONLINE..., ON SUBTOTAL, GRAND TOTAL
         ordered_keys = [k for k in detail_mix.columns if k.startswith("GS|") and k != "GS|SUBTOTAL"] \
                      + ["GS|SUBTOTAL"] \
                      + [k for k in detail_mix.columns if k.startswith("ON|") and k != "ON|SUBTOTAL"] \
-                     + ["ON|SUBTOTAL"]
+                     + ["ON|SUBTOTAL"] \
+                     + ["GT|GRAND TOTAL"]
 
         df2_fmt = df2_fmt[["NO", "Tanggal"] + ordered_keys]
 
