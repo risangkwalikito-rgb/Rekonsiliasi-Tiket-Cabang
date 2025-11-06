@@ -610,7 +610,7 @@ if go:
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         use_container_width=True,
     )
-           # ======================================================================
+               # ======================================================================
     # ===========  TABEL BARU: DETAIL TIKET (GO SHOW × SUB-KATEGORI)  ======
     # ======================================================================
 
@@ -661,7 +661,7 @@ if go:
 
         # >>> TIDAK MEMPERDULIKAN ST BAYAR (paid/unpaid sama-sama dihitung)
 
-        # Normalisasi teks (pakai fungsi normalisasi yang sama seperti sebelumnya)
+        # Normalisasi teks
         main_norm_all = tix[type_main_col].apply(_norm_str)   # kolom B (GO SHOW/ONLINE)
         sub_norm_all  = tix[type_sub_col].apply(_norm_str)    # kolom J
         bank_norm_all = tix[bank_col].apply(_norm_str)        # kolom I
@@ -681,12 +681,11 @@ if go:
         # Kalender indeks 1..akhir bulan
         idx2 = pd.Index(pd.date_range(month_start, month_end, freq="D").date, name="Tanggal")
 
-        # ================= GO SHOW (pakai rumus lama: TANPA drop_duplicates) =================
-        # Ambil Series mask khusus GO SHOW agar panjang/indeks sama dengan tix
+        # ================= GO SHOW (rumus semula; TANPA drop_duplicates) =================
         gs = tix.copy()
-        gs_sub = m_prepaid_all
-        gs_emo = m_emoney_all
-        gs_var = m_varetail_all
+        gs_sub  = m_prepaid_all
+        gs_emo  = m_emoney_all
+        gs_var  = m_varetail_all
         gs_bank = bank_norm_all
 
         s_gs_prepaid_bca     = gs.loc[m_go_show & gs_sub & (gs_bank == "bca")    ].groupby(gs[date_col].dt.date, dropna=True)[tarif_col].sum()
@@ -705,12 +704,14 @@ if go:
             "VIRTUAL ACCOUNT DAN GERAI RETAIL - ESPAY": s_gs_varetail_espay.reindex(idx2, fill_value=0.0),
         }
 
-        # ================= ONLINE (pakai rumus lama: TANPA drop_duplicates) =================
-        on = tix.copy()
-        on_sub   = sub_norm_all
-        on_bank  = bank_norm_all
-        m_emoney_on   = ((on_sub == "e-money") | on_sub.str.contains(r"\be[-\s]*money\b|\bemoney\b", na=False))
-        m_varetail_on = on_sub.str.contains(r"virtual\s*account", na=False) & on_sub.str_contains(r"gerai|retail", na=False)
+        # ================= ONLINE (rumus semula; TANPA drop_duplicates) =================
+        on      = tix.copy()
+        on_sub  = sub_norm_all
+        on_bank = bank_norm_all
+
+        m_emoney_on    = ((on_sub == "e-money") | on_sub.str.contains(r"\be[-\s]*money\b|\bemoney\b", na=False))
+        # >>> perbaikan typo di sini: str.contains (BUKAN str_contains)
+        m_varetail_on  = on_sub.str.contains(r"virtual\s*account", na=False) & on_sub.str.contains(r"gerai|retail", na=False)
         m_bank_espay_on = (on_bank == "espay")
 
         s_on_emoney_espay   = on.loc[m_online & m_bank_espay_on & m_emoney_on]  .groupby(on[date_col].dt.date, dropna=True)[tarif_col].sum()
@@ -751,7 +752,7 @@ if go:
             total_row[k] = float(detail_mix[k].sum())
         df2 = pd.concat([df2, pd.DataFrame([total_row])], ignore_index=True)
 
-        # Format rupiah (langsung apply; _idr_fmt aman untuk non-numeric)
+        # Format rupiah
         df2_fmt = df2.copy()
         for c in df2_fmt.columns:
             if c in ("NO", "Tanggal"):
