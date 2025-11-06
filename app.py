@@ -880,13 +880,12 @@ if go:
             use_container_width=True,
         )
 
-    # ======================================================================
+       # ======================================================================
     # ===================  TABEL: DETAIL SETTLEMENT REPORT  =================
     # ======================================================================
     st.subheader("DETAIL SETTLEMENT REPORT")
 
     # --- Siapkan mapping kolom dari Settlement ---
-    # (pakai variabel yang sudah ditemukan sebelumnya; jika belum, cari lagi)
     s_date_E = s_date_E or _find_col(settle_df, ["Settlement Date","Tanggal Settlement","Settle Date","Tanggal"])
     s_amt_L  = s_amt_L  or _find_col(settle_df, ["Settlement Amount","Amount","Nominal","Jumlah"])
     if s_amt_L is None and not settle_df.empty and len(settle_df.columns) >= 12:
@@ -918,44 +917,42 @@ if go:
         order_norm  = sd[s_order].astype(str).str.strip().str.casefold()
 
         # Identifikasi GO SHOW vs ONLINE via ORDER ID
-        # GO SHOW: ORDER ID berakhiran "_ORD" (toleran: juga yang berakhir "ord" dengan prefix bukan "ord")
+        # GO SHOW: ORDER ID berakhiran "_ord" atau "...ord" (bukan yang diawali "ord")
         go_show_mask = order_norm.str.endswith("_ord") | (~order_norm.str.startswith("ord") & order_norm.str.endswith("ord"))
-        # ONLINE: ORDER ID diawali "ORD"
+        # ONLINE: ORDER ID diawali "ord"
         online_mask  = order_norm.str.startswith("ord")
 
         # Kategori produk:
-        has_va   = prod_norm.str.contains("va", na=False)
-        is_bca   = (prod_norm == "bca va online")          # BCA spesifik
-        non_bca  = has_va & ~is_bca                         # VA selain BCA VA ONLINE
-        is_emny  = ~has_va                                  # E-Money = selain VA
+        has_va      = prod_norm.str.contains("va", na=False)                  # mengandung 'va'
+        is_bca_va   = (prod_norm == "bca va online")                          # BCA spesifik
+        non_bca_va  = has_va & ~is_bca_va                                     # VA selain BCA VA ONLINE
+        is_emoney   = ~has_va                                                 # E-Money = selain VA
 
         # Grouping per tanggal (pakai Settlement Date)
         # --- GO SHOW ---
-        gs_va_bca     = sd.loc[go_show_mask & is_bca]  .groupby(sd[s_date_E].dt.date, dropna=True)[s_amt_L].sum()
-        gs_va_nonbca  = sd.loc[go_show_mask & non_bca] .groupby(sd[s_date_E].dt.date, dropna=True)[s_amt_L].sum()
-        gs_emoney     = sd.loc[go_show_mask & is_emny] .groupby(sd[s_date_E].dt.date, dropna=True)[s_amt_L].sum()
+        gs_va_bca     = sd.loc[go_show_mask & is_bca_va] .groupby(sd[s_date_E].dt.date, dropna=True)[s_amt_L].sum()
+        gs_va_nonbca  = sd.loc[go_show_mask & non_bca_va].groupby(sd[s_date_E].dt.date, dropna=True)[s_amt_L].sum()
+        gs_emoney     = sd.loc[go_show_mask & is_emoney] .groupby(sd[s_date_E].dt.date, dropna=True)[s_amt_L].sum()
 
-        # --- ONLINE ---
-        on_bca        = sd.loc[online_mask & is_bca]   .groupby(sd[s_date_E].dt.date, dropna=True)[s_amt_L].sum()
-        on_nonbca     = sd.loc[online_mask & ~is_bca]  .groupby(sd[s_date_E].dt.date, dropna=True)[s_amt_L].sum()
+        # --- ONLINE (RALAT: tambah E-Money; NON BCA terbatas pada VA lain) ---
+        on_va_bca     = sd.loc[online_mask & is_bca_va]  .groupby(sd[s_date_E].dt.date, dropna=True)[s_amt_L].sum()
+        on_va_nonbca  = sd.loc[online_mask & non_bca_va] .groupby(sd[s_date_E].dt.date, dropna=True)[s_amt_L].sum()
+        on_emoney     = sd.loc[online_mask & is_emoney]  .groupby(sd[s_date_E].dt.date, dropna=True)[s_amt_L].sum()
 
         # Reindex ke kalender bulan
         idx_set = pd.Index(pd.date_range(month_start, month_end, freq="D").date, name="Tanggal")
         cols_det = {
-            "GS|VIRTUAL ACCOUNT - BCA":     gs_va_bca.reindex(idx_set, fill_value=0.0),
-            "GS|VIRTUAL ACCOUNT - NON BCA": gs_va_nonbca.reindex(idx_set, fill_value=0.0),
-            "GS|E-MONEY":                   gs_emoney.reindex(idx_set, fill_value=0.0),
-            "ON|BCA":                       on_bca.reindex(idx_set, fill_value=0.0),
-            "ON|NON BCA":                   on_nonbca.reindex(idx_set, fill_value=0.0),
+            "GS|VIRTUAL ACCOUNT - BCA":          gs_va_bca.reindex(idx_set, fill_value=0.0),
+            "GS|VIRTUAL ACCOUNT - NON BCA":      gs_va_nonbca.reindex(idx_set, fill_value=0.0),
+            "GS|E-MONEY":                        gs_emoney.reindex(idx_set, fill_value=0.0),
+            "ON|VIRTUAL ACCOUNT - BCA":          on_va_bca.reindex(idx_set, fill_value=0.0),
+            "ON|VIRTUAL ACCOUNT - NON BCA":      on_va_nonbca.reindex(idx_set, fill_value=0.0),
+            "ON|E-MONEY":                        on_emoney.reindex(idx_set, fill_value=0.0),
         }
 
         detail_settle = pd.DataFrame(index=idx_set)
         for k, ser in cols_det.items():
             detail_settle[k] = ser.values
-
-        # Subtotal per grup (opsional—kalau mau aktifkan, uncomment baris berikut)
-        # detail_settle["GS|SUBTOTAL"] = detail_settle.filter(like="GS|").sum(axis=1)
-        # detail_settle["ON|SUBTOTAL"] = detail_settle.filter(like="ON|").sum(axis=1)
 
         # Render dengan header bertingkat
         df3 = detail_settle.reset_index()
