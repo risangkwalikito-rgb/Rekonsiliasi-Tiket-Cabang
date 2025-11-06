@@ -786,3 +786,96 @@ if go:
         df2_fmt_mi.columns = pd.MultiIndex.from_tuples(top)
 
         st.dataframe(df2_fmt_mi, use_container_width=True, hide_index=True)
+
+        # ------------------- Download Excel (Detail Tiket) saja -------------------
+        from openpyxl.styles import Alignment, Font
+        from openpyxl.utils import get_column_letter
+
+        bio_detail = io.BytesIO()
+        with pd.ExcelWriter(bio_detail, engine="openpyxl") as xw2:
+            # Sheet 1: angka mentah
+            df2.to_excel(xw2, index=False, sheet_name="Detail_Tiket")
+
+            # Sheet 2: tampilan dengan header merger 2 baris
+            wsname = "Detail_Tiket_View"
+            # Tulis body tanpa header (mulai baris ke-3)
+            df2_fmt.to_excel(xw2, index=False, header=False, sheet_name=wsname, startrow=2)
+            wb2 = xw2.book
+            ws2 = wb2[wsname]
+
+            # Susun header baris-atas (kelompok) & baris-bawah (sub kolom)
+            # Ambil kolom dari df2 (raw) agar urutan konsisten dengan body yang ditulis
+            cols = list(df2.columns)  # ["NO","Tanggal","GS|...","ON|...","GT|GRAND TOTAL",...]
+            top_headers = []
+            sub_headers = []
+            for c in cols:
+                if c in ("NO", "Tanggal"):
+                    top_headers.append("")            # akan di-merge vertikal
+                    sub_headers.append(c)
+                elif c.startswith("GS|"):
+                    top_headers.append("GO SHOW")
+                    sub_headers.append(c[3:])
+                elif c.startswith("ON|"):
+                    top_headers.append("ONLINE")
+                    sub_headers.append(c[3:])
+                elif c.startswith("GT|"):
+                    top_headers.append("GRAND TOTAL")
+                    sub_headers.append("")           # merge vertikal (2 baris)
+                else:
+                    top_headers.append("")
+                    sub_headers.append(c)
+
+            # Tulis header baris 1 & 2
+            for j, (top, sub) in enumerate(zip(top_headers, sub_headers), start=1):
+                ws2.cell(row=1, column=j, value=top)
+                ws2.cell(row=2, column=j, value=sub)
+
+            # Merge horizontal untuk grup yang sama di baris-atas (GO SHOW / ONLINE)
+            def _merge_same_run(labels, row_idx):
+                start = 0
+                while start < len(labels):
+                    end = start
+                    while end + 1 < len(labels) and labels[end + 1] == labels[start]:
+                        end += 1
+                    label = labels[start]
+                    if label not in ("", None) and end >= start:
+                        ws2.merge_cells(start_row=row_idx, start_column=start + 1,
+                                        end_row=row_idx, end_column=end + 1)
+                    start = end + 1
+
+            _merge_same_run(top_headers, row_idx=1)
+
+            # Merge vertikal untuk kolom yang memang 1 kolom (NO, Tanggal) dan GRAND TOTAL
+            for j, (top, sub) in enumerate(zip(top_headers, sub_headers), start=1):
+                if top == "" or (top == "GRAND TOTAL" and sub == ""):
+                    ws2.merge_cells(start_row=1, start_column=j, end_row=2, end_column=j)
+
+            # Gaya header
+            max_col = len(cols)
+            for c in range(1, max_col + 1):
+                ws2.cell(row=1, column=c).font = Font(bold=True)
+                ws2.cell(row=2, column=c).font = Font(bold=True)
+                ws2.cell(row=1, column=c).alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+                ws2.cell(row=2, column=c).alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+
+            ws2.row_dimensions[1].height = 22
+            ws2.row_dimensions[2].height = 22
+
+            # Lebar kolom otomatis sederhana
+            # (ambil lebar maksimum dari header & beberapa baris awal body)
+            sample_rows = min(50, df2_fmt.shape[0])
+            for idx_col, col_name in enumerate(cols, start=1):
+                max_len = max(len(str(col_name)), len(str(sub_headers[idx_col-1])), len(str(top_headers[idx_col-1])))
+                for r in range(3, 3 + sample_rows):
+                    v = ws2.cell(row=r, column=idx_col).value
+                    if v is not None:
+                        max_len = max(max_len, len(str(v)))
+                ws2.column_dimensions[get_column_letter(idx_col)].width = min(max(10, max_len + 2), 45)
+
+        st.download_button(
+            "Unduh Excel (Detail Tiket)",
+            data=bio_detail.getvalue(),
+            file_name=f"detail_tiket_{y}-{m:02d}.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            use_container_width=True,
+        )
