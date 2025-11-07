@@ -1,3 +1,4 @@
+
 # app.py
 # -*- coding: utf-8 -*-
 """
@@ -609,96 +610,466 @@ if go:
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         use_container_width=True,
     )
-
+                  # ======================================================================
+    # ===========  TABEL BARU: DETAIL TIKET (GO SHOW × SUB-KATEGORI)  ======
     # ======================================================================
-    # ================  TABEL BARU: DETAIL TIKET (TYPE × BANK)  ============
-    # ======================================================================
 
-    # Untuk tabel 2, gunakan Action Date juga sebagai tanggal
-    t_date_any = t_date_action
-    type_col = _find_col(tiket_df, ["Type","Tipe","Jenis","Payment Type","Channel Type","Transaction Type"])
-    bank_col = t_bank
-    # Untuk tabel 2 nominal bisa pakai kolom umum (fallback jika ada)
-    t_amt_any = _find_col(tiket_df, ["tarif","amount","nominal","jumlah","total"])
+    # Helper: ambil nama kolom berdasarkan huruf (A..Z, AA..)
+    def _col_by_letter_local(df: pd.DataFrame, letters: str) -> Optional[str]:
+        if df is None or df.empty:
+            return None
+        s = letters.strip().upper()
+        if not s:
+            return None
+        n = 0
+        for ch in s:
+            if not ("A" <= ch <= "Z"):
+                return None
+            n = n * 26 + (ord(ch) - ord("A") + 1)
+        idx = n - 1
+        return df.columns[idx] if 0 <= idx < len(df.columns) else None
 
-    if type_col and bank_col and t_date_any and t_amt_any:
+    # Kolom sumber (pakai header kalau ada; fallback ke huruf kolom)
+    type_main_col = _find_col(tiket_df, ["Type","Tipe","Jenis"]) or _col_by_letter_local(tiket_df, "B")   # GO SHOW / ONLINE
+    bank_col      = _find_col(tiket_df, ["Bank","Payment Channel","channel","payment method"]) or _col_by_letter_local(tiket_df, "I")
+    type_sub_col  = (
+        _find_col(tiket_df, [
+            "Payment Type","Channel Type","Transaction Type","Sub Type",
+            "Tipe","Tipe Pembayaran","Jenis Pembayaran","Kategori","Metode","Product Type"
+        ]) or _col_by_letter_local(tiket_df, "J")
+    )
+    date_col      = _find_col(tiket_df, ["Action/Action Date","Action Date","Action","Action date"]) or _col_by_letter_local(tiket_df, "AG")
+    tarif_col     = _find_col(tiket_df, ["Tarif","tarif"]) or _col_by_letter_local(tiket_df, "Y")
+
+    required_missing = [n for n, c in [
+        ("TYPE (kolom B)", type_main_col),
+        ("BANK (kolom I)", bank_col),
+        ("TIPE / SUB-TIPE (kolom J)", type_sub_col),
+        ("ACTION DATE (kolom AG)", date_col),
+        ("TARIF (kolom Y)", tarif_col),
+    ] if c is None]
+
+    if required_missing:
+        st.warning("Kolom wajib untuk tabel 'Detail Tiket (GO SHOW/ONLINE)' belum lengkap: " + ", ".join(required_missing))
+    else:
         tix = tiket_df.copy()
-        tix[t_date_any] = tix[t_date_any].apply(_to_date)
-        tix = tix[~tix[t_date_any].isna()]
-        tix = tix[(tix[t_date_any] >= month_start) & (tix[t_date_any] <= month_end)]
-        if t_stat:
-            stat_norm = tix[t_stat].astype(str).str.strip().str.lower()
-            # Tabel 2 longgar: paid/success/sukses/settled/lunas
-            tix = tix[stat_norm.str.contains(r"\bpaid\b|\bsuccess\b|sukses|settled|lunas", na=False)]
-        tix[t_amt_any] = _to_num(tix[t_amt_any])
 
-        def _bank_bucket(s: str) -> str:
-            s = str(s).strip().lower()
-            if "bri" in s: return "BRI"
-            if "bni" in s: return "BNI"
-            if "mandiri" in s: return "MANDIRI"
-            if "bca" in s: return "BCA"
-            return "LAINNYA"
+        # Tanggal dari kolom AG
+        tix[date_col] = tix[date_col].apply(_to_date)
+        tix = tix[~tix[date_col].isna()]
+        tix = tix[(tix[date_col] >= month_start) & (tix[date_col] <= month_end)]
 
-        def _type_bucket(s: str) -> str:
-            s = str(s).strip().lower()
-            mapping = [
-                ("Cash", ["cash"]),
-                ("Transfer", ["transfer"]),
-                ("Tmanual ASDP", ["tmanual", "manual asdp", "tiket manual"]),
-                ("Prepaid", ["prepaid"]),
-                ("Go Show", ["go show","go-show","goshows"]),
-                ("Virtual Account dan Gerai Retail", ["virtual account","gerai","retail"]),
-                ("ESPAY", ["espay"]),
-                ("e-Money", ["e-money","emoney","e money"]),
-                ("Online", ["online"]),
-            ]
-            for label, keys in mapping:
-                if any(k in s for k in keys):
-                    return label
-            return "Lainnya"
+        # >>> TIDAK MEMPERDULIKAN ST BAYAR (paid/unpaid sama-sama dihitung)
 
-        tix["__TYPE__"] = tix[type_col].apply(_type_bucket)
-        tix["__BANK__"] = tix[bank_col].apply(_bank_bucket)
+        # Normalisasi teks
+        main_norm_all = tix[type_main_col].apply(_norm_str)   # kolom B (GO SHOW/ONLINE)
+        sub_norm_all  = tix[type_sub_col].apply(_norm_str)    # kolom J
+        bank_norm_all = tix[bank_col].apply(_norm_str)        # kolom I
 
-        pivot = tix.pivot_table(
-            index=tix[t_date_any].dt.date,
-            columns=["__TYPE__","__BANK__"],
-            values=t_amt_any,
-            aggfunc="sum",
-            fill_value=0.0,
-        )
+        # Amount dari kolom Y = Tarif
+        tix[tarif_col] = _to_num(tix[tarif_col])
 
-        TYPE_ORDER = [
-            "Cash","Transfer","Tmanual ASDP","Prepaid","Go Show",
-            "Virtual Account dan Gerai Retail","ESPAY","e-Money","Online","Lainnya"
-        ]
-        BANK_ORDER = ["BRI","BNI","MANDIRI","BCA","LAINNYA"]
-        full_cols = pd.MultiIndex.from_product([TYPE_ORDER, BANK_ORDER], names=["TYPE","BANK"])
-        pivot = pivot.reindex(columns=full_cols, fill_value=0.0)
-        pivot = pivot.loc[:, (pivot.sum(axis=0) != 0)]
-        pivot.index.name = "Tanggal"
+        # Mask Type
+        m_go_show = (main_norm_all == "go show") | main_norm_all.str.contains(r"\bgo\s*show\b", na=False)
+        m_online  = (main_norm_all == "online")  | main_norm_all.str.contains(r"\bonline\b",    na=False)
 
-        st.subheader("Detail Tiket per Tanggal — Type × Bank (Tiket Detail)")
-        df2 = pivot.reset_index()
+        # Mask Sub-Tipe (toleran variasi)
+        m_prepaid_all  = (sub_norm_all == "prepaid") | sub_norm_all.str.contains(r"\bprepaid\b", na=False)
+        m_emoney_all   = (sub_norm_all == "e-money") | sub_norm_all.str.contains(r"\be[-\s]*money\b|\bemoney\b", na=False)
+        m_varetail_all = sub_norm_all.str.contains(r"virtual\s*account", na=False) & sub_norm_all.str.contains(r"gerai|retail", na=False)
+
+        # Kalender indeks 1..akhir bulan
+        idx2 = pd.Index(pd.date_range(month_start, month_end, freq="D").date, name="Tanggal")
+
+        # ================= GO SHOW (rumus semula; TANPA drop_duplicates) =================
+        gs = tix.copy()
+        gs_sub  = m_prepaid_all
+        gs_emo  = m_emoney_all
+        gs_var  = m_varetail_all
+        gs_bank = bank_norm_all
+
+        s_gs_prepaid_bca     = gs.loc[m_go_show & gs_sub & (gs_bank == "bca")    ].groupby(gs[date_col].dt.date, dropna=True)[tarif_col].sum()
+        s_gs_prepaid_bri     = gs.loc[m_go_show & gs_sub & (gs_bank == "bri")    ].groupby(gs[date_col].dt.date, dropna=True)[tarif_col].sum()
+        s_gs_prepaid_bni     = gs.loc[m_go_show & gs_sub & (gs_bank == "bni")    ].groupby(gs[date_col].dt.date, dropna=True)[tarif_col].sum()
+        s_gs_prepaid_mandiri = gs.loc[m_go_show & gs_sub & (gs_bank == "mandiri")].groupby(gs[date_col].dt.date, dropna=True)[tarif_col].sum()
+        s_gs_emoney_espay    = gs.loc[m_go_show & gs_emo & (gs_bank == "espay")  ].groupby(gs[date_col].dt.date, dropna=True)[tarif_col].sum()
+        s_gs_varetail_espay  = gs.loc[m_go_show & gs_var & (gs_bank == "espay")  ].groupby(gs[date_col].dt.date, dropna=True)[tarif_col].sum()
+
+        go_show_cols = {
+            "PREPAID - BCA":     s_gs_prepaid_bca.reindex(idx2, fill_value=0.0),
+            "PREPAID - BRI":     s_gs_prepaid_bri.reindex(idx2, fill_value=0.0),
+            "PREPAID - BNI":     s_gs_prepaid_bni.reindex(idx2, fill_value=0.0),
+            "PREPAID - MANDIRI": s_gs_prepaid_mandiri.reindex(idx2, fill_value=0.0),
+            "E-MONEY - ESPAY":   s_gs_emoney_espay.reindex(idx2, fill_value=0.0),
+            "VIRTUAL ACCOUNT DAN GERAI RETAIL - ESPAY": s_gs_varetail_espay.reindex(idx2, fill_value=0.0),
+        }
+
+        # ================= ONLINE (rumus semula; TANPA drop_duplicates) =================
+        on      = tix.copy()
+        on_sub  = sub_norm_all
+        on_bank = bank_norm_all
+
+        m_emoney_on     = ((on_sub == "e-money") | on_sub.str.contains(r"\be[-\s]*money\b|\bemoney\b", na=False))
+        m_varetail_on   = on_sub.str.contains(r"virtual\s*account", na=False) & on_sub.str.contains(r"gerai|retail", na=False)
+        m_bank_espay_on = (on_bank == "espay")
+
+        s_on_emoney_espay   = on.loc[m_online & m_bank_espay_on & m_emoney_on]  .groupby(on[date_col].dt.date, dropna=True)[tarif_col].sum()
+        s_on_varetail_espay = on.loc[m_online & m_bank_espay_on & m_varetail_on].groupby(on[date_col].dt.date, dropna=True)[tarif_col].sum()
+
+        online_cols = {
+            "E-MONEY - ESPAY":                        s_on_emoney_espay.reindex(idx2, fill_value=0.0),
+            "VIRTUAL ACCOUNT & GERAI RETAIL - ESPAY": s_on_varetail_espay.reindex(idx2, fill_value=0.0),
+        }
+
+        # ===== Gabungkan + SUBTOTAL per grup + GRAND TOTAL =====
+        detail_mix = pd.DataFrame(index=idx2)
+
+        # Tambah kolom GO SHOW
+        for k, ser in go_show_cols.items():
+            detail_mix[f"GS|{k}"] = ser.values
+        # Subtotal GO SHOW (per tanggal)
+        gs_df        = pd.DataFrame(go_show_cols, index=idx2)
+        gs_subtotal  = gs_df.sum(axis=1) if not gs_df.empty else pd.Series(0.0, index=idx2)
+        detail_mix["GS|SUBTOTAL"] = gs_subtotal.values
+
+        # Tambah kolom ONLINE
+        for k, ser in online_cols.items():
+            detail_mix[f"ON|{k}"] = ser.values
+        # Subtotal ONLINE (per tanggal)
+        on_df        = pd.DataFrame(online_cols, index=idx2)
+        on_subtotal  = on_df.sum(axis=1) if not on_df.empty else pd.Series(0.0, index=idx2)
+        detail_mix["ON|SUBTOTAL"] = on_subtotal.values
+
+        # GRAND TOTAL = SUBTOTAL GO SHOW + SUBTOTAL ONLINE (per tanggal)
+        detail_mix["GT|GRAND TOTAL"] = detail_mix["GS|SUBTOTAL"] + detail_mix["ON|SUBTOTAL"]
+
+        # === Render dengan header bertingkat: GO SHOW | ONLINE | GRAND TOTAL ===
+        st.subheader("Detail Tiket per Tanggal — TYPE: GO SHOW & ONLINE × SUB-TIPE (J) [SEMUA STATUS]")
+        df2 = detail_mix.reset_index()
         df2.insert(0, "NO", range(1, len(df2) + 1))
 
-        # >>> Tambah subtotal (TOTAL) di bawah
-        totals = pivot.sum(axis=0)  # jumlah per kolom TYPE×BANK
+        # Baris TOTAL (subtotal bawah tabel)
         total_row = {"NO": "", "Tanggal": "TOTAL"}
-        for col in pivot.columns:
-            total_row[col] = float(totals.get(col, 0.0))
+        for k in detail_mix.columns:
+            total_row[k] = float(detail_mix[k].sum())
         df2 = pd.concat([df2, pd.DataFrame([total_row])], ignore_index=True)
 
-        # format rupiah hanya untuk kolom numerik
-        from pandas.api.types import is_numeric_dtype
+        # Format rupiah
         df2_fmt = df2.copy()
         for c in df2_fmt.columns:
             if c in ("NO", "Tanggal"):
                 continue
-            if is_numeric_dtype(df2_fmt[c]):
-                df2_fmt[c] = df2_fmt[c].apply(_idr_fmt)
+            df2_fmt[c] = df2_fmt[c].apply(_idr_fmt)
 
-        st.dataframe(df2_fmt, use_container_width=True, hide_index=True)
+        # MultiIndex columns: ("GO SHOW", ...), ("ONLINE", ...), ("GRAND TOTAL", <merged 2 baris>)
+        def _strip_prefix(col_name: str) -> tuple[str, str]:
+            if col_name.startswith("GS|"):
+                return ("GO SHOW", col_name[3:])
+            if col_name.startswith("ON|"):
+                return ("ONLINE", col_name[3:])
+            if col_name.startswith("GT|"):
+                # header 2 baris 'merged' untuk GRAND TOTAL (baris bawah kosong)
+                return ("GRAND TOTAL", "")
+            return ("", col_name)
+
+        # urutan: NO, Tanggal, GO SHOW..., GS SUBTOTAL, ONLINE..., ON SUBTOTAL, GRAND TOTAL
+        ordered_keys = [k for k in detail_mix.columns if k.startswith("GS|") and k != "GS|SUBTOTAL"] \
+                     + ["GS|SUBTOTAL"] \
+                     + [k for k in detail_mix.columns if k.startswith("ON|") and k != "ON|SUBTOTAL"] \
+                     + ["ON|SUBTOTAL"] \
+                     + ["GT|GRAND TOTAL"]
+
+        df2_fmt = df2_fmt[["NO", "Tanggal"] + ordered_keys]
+
+        top = [("", "NO"), ("", "Tanggal")] + [ _strip_prefix(k) for k in ordered_keys ]
+        df2_fmt_mi = df2_fmt.copy()
+        df2_fmt_mi.columns = pd.MultiIndex.from_tuples(top)
+
+        st.dataframe(df2_fmt_mi, use_container_width=True, hide_index=True)
+
+        # ------------------- Download Excel (Detail Tiket) saja -------------------
+        from openpyxl.styles import Alignment, Font
+        from openpyxl.utils import get_column_letter
+
+        bio_detail = io.BytesIO()
+        with pd.ExcelWriter(bio_detail, engine="openpyxl") as xw2:
+            # Sheet 1: angka mentah
+            df2.to_excel(xw2, index=False, sheet_name="Detail_Tiket")
+
+            # Sheet 2: tampilan dengan header merger 2 baris
+            wsname = "Detail_Tiket_View"
+            # Tulis body tanpa header (mulai baris ke-3)
+            df2_fmt.to_excel(xw2, index=False, header=False, sheet_name=wsname, startrow=2)
+            wb2 = xw2.book
+            ws2 = wb2[wsname]
+
+            # Susun header baris-atas (kelompok) & baris-bawah (sub kolom)
+            # Ambil kolom dari df2 (raw) agar urutan konsisten dengan body yang ditulis
+            cols = list(df2.columns)  # ["NO","Tanggal","GS|...","ON|...","GT|GRAND TOTAL",...]
+            top_headers = []
+            sub_headers = []
+            for c in cols:
+                if c in ("NO", "Tanggal"):
+                    top_headers.append("")            # akan di-merge vertikal
+                    sub_headers.append(c)
+                elif c.startswith("GS|"):
+                    top_headers.append("GO SHOW")
+                    sub_headers.append(c[3:])
+                elif c.startswith("ON|"):
+                    top_headers.append("ONLINE")
+                    sub_headers.append(c[3:])
+                elif c.startswith("GT|"):
+                    top_headers.append("GRAND TOTAL")
+                    sub_headers.append("")           # merge vertikal (2 baris)
+                else:
+                    top_headers.append("")
+                    sub_headers.append(c)
+
+            # Tulis header baris 1 & 2
+            for j, (top, sub) in enumerate(zip(top_headers, sub_headers), start=1):
+                ws2.cell(row=1, column=j, value=top)
+                ws2.cell(row=2, column=j, value=sub)
+
+            # Merge horizontal untuk grup yang sama di baris-atas (GO SHOW / ONLINE)
+            def _merge_same_run(labels, row_idx):
+                start = 0
+                while start < len(labels):
+                    end = start
+                    while end + 1 < len(labels) and labels[end + 1] == labels[start]:
+                        end += 1
+                    label = labels[start]
+                    if label not in ("", None) and end >= start:
+                        ws2.merge_cells(start_row=row_idx, start_column=start + 1,
+                                        end_row=row_idx, end_column=end + 1)
+                    start = end + 1
+
+            _merge_same_run(top_headers, row_idx=1)
+
+            # Merge vertikal untuk kolom yang memang 1 kolom (NO, Tanggal) dan GRAND TOTAL
+            for j, (top, sub) in enumerate(zip(top_headers, sub_headers), start=1):
+                if top == "" or (top == "GRAND TOTAL" and sub == ""):
+                    ws2.merge_cells(start_row=1, start_column=j, end_row=2, end_column=j)
+
+            # Gaya header
+            max_col = len(cols)
+            for c in range(1, max_col + 1):
+                ws2.cell(row=1, column=c).font = Font(bold=True)
+                ws2.cell(row=2, column=c).font = Font(bold=True)
+                ws2.cell(row=1, column=c).alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+                ws2.cell(row=2, column=c).alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+
+            ws2.row_dimensions[1].height = 22
+            ws2.row_dimensions[2].height = 22
+
+            # Lebar kolom otomatis sederhana
+            # (ambil lebar maksimum dari header & beberapa baris awal body)
+            sample_rows = min(50, df2_fmt.shape[0])
+            for idx_col, col_name in enumerate(cols, start=1):
+                max_len = max(len(str(col_name)), len(str(sub_headers[idx_col-1])), len(str(top_headers[idx_col-1])))
+                for r in range(3, 3 + sample_rows):
+                    v = ws2.cell(row=r, column=idx_col).value
+                    if v is not None:
+                        max_len = max(max_len, len(str(v)))
+                ws2.column_dimensions[get_column_letter(idx_col)].width = min(max(10, max_len + 2), 45)
+
+        st.download_button(
+            "Unduh Excel (Detail Tiket)",
+            data=bio_detail.getvalue(),
+            file_name=f"detail_tiket_{y}-{m:02d}.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            use_container_width=True,
+        )
+
+       # ======================================================================
+    # ===================  TABEL: DETAIL SETTLEMENT REPORT  =================
+    # ======================================================================
+    st.subheader("DETAIL SETTLEMENT REPORT")
+
+    # --- Siapkan mapping kolom dari Settlement ---
+    s_date_E = s_date_E or _find_col(settle_df, ["Settlement Date","Tanggal Settlement","Settle Date","Tanggal"])
+    s_amt_L  = s_amt_L  or _find_col(settle_df, ["Settlement Amount","Amount","Nominal","Jumlah"])
+    if s_amt_L is None and not settle_df.empty and len(settle_df.columns) >= 12:
+        s_amt_L = settle_df.columns[11]  # kolom L
+    s_prod_P = s_prod_P or _find_col(settle_df, ["Product Name","Produk","Nama Produk"])
+    if s_date_E is None and not settle_df.empty and len(settle_df.columns) >= 5:
+        s_date_E = settle_df.columns[4]  # kolom E
+    if s_prod_P is None and not settle_df.empty and len(settle_df.columns) >= 16:
+        s_prod_P = settle_df.columns[15]  # kolom P (fallback)
+
+    s_order = _find_col(settle_df, ["Order ID","OrderId","Order Number","Order No","OrderID","order id"])
+
+    need = [("Settlement Date (E)", s_date_E), ("Settlement Amount (L)", s_amt_L),
+            ("Product Name (P)", s_prod_P), ("Order ID", s_order)]
+    miss = [n for n,c in need if c is None]
+    if miss:
+        st.warning("Kolom untuk 'DETAIL SETTLEMENT REPORT' belum lengkap: " + ", ".join(miss))
     else:
-        st.info("Kolom **Type/Bank/Tanggal/Nominal** tidak lengkap di Tiket Detail, tabel 'Detail Tiket (Type × Bank)' tidak bisa dibuat.")
+        sd = settle_df.copy()
+
+        # Parse tanggal & filter periode
+        sd[s_date_E] = sd[s_date_E].apply(_to_date)
+        sd = sd[~sd[s_date_E].isna()]
+        sd = sd[(sd[s_date_E] >= month_start) & (sd[s_date_E] <= month_end)]
+
+        # Normalisasi nilai
+        sd[s_amt_L] = _to_num(sd[s_amt_L])
+        prod_norm   = sd[s_prod_P].astype(str).str.strip().str.casefold()
+        order_norm  = sd[s_order].astype(str).str.strip().str.casefold()
+
+        # Identifikasi GO SHOW vs ONLINE via ORDER ID
+        # GO SHOW: ORDER ID berakhiran "_ord" atau "...ord" (bukan yang diawali "ord")
+        go_show_mask = order_norm.str.endswith("_ord") | (~order_norm.str.startswith("ord") & order_norm.str.endswith("ord"))
+        # ONLINE: ORDER ID diawali "ord"
+        online_mask  = order_norm.str.startswith("ord")
+
+        # Kategori produk:
+        has_va      = prod_norm.str.contains("va", na=False)                  # mengandung 'va'
+        is_bca_va   = (prod_norm == "bca va online")                          # BCA spesifik
+        non_bca_va  = has_va & ~is_bca_va                                     # VA selain BCA VA ONLINE
+        is_emoney   = ~has_va                                                 # E-Money = selain VA
+
+        # Grouping per tanggal (pakai Settlement Date)
+        # --- GO SHOW ---
+        gs_va_bca     = sd.loc[go_show_mask & is_bca_va] .groupby(sd[s_date_E].dt.date, dropna=True)[s_amt_L].sum()
+        gs_va_nonbca  = sd.loc[go_show_mask & non_bca_va].groupby(sd[s_date_E].dt.date, dropna=True)[s_amt_L].sum()
+        gs_emoney     = sd.loc[go_show_mask & is_emoney] .groupby(sd[s_date_E].dt.date, dropna=True)[s_amt_L].sum()
+
+        # --- ONLINE (RALAT: tambah E-Money; NON BCA terbatas pada VA lain) ---
+        on_va_bca     = sd.loc[online_mask & is_bca_va]  .groupby(sd[s_date_E].dt.date, dropna=True)[s_amt_L].sum()
+        on_va_nonbca  = sd.loc[online_mask & non_bca_va] .groupby(sd[s_date_E].dt.date, dropna=True)[s_amt_L].sum()
+        on_emoney     = sd.loc[online_mask & is_emoney]  .groupby(sd[s_date_E].dt.date, dropna=True)[s_amt_L].sum()
+
+        # Reindex ke kalender bulan
+        idx_set = pd.Index(pd.date_range(month_start, month_end, freq="D").date, name="Tanggal")
+        cols_det = {
+            "GS|VIRTUAL ACCOUNT - BCA":          gs_va_bca.reindex(idx_set, fill_value=0.0),
+            "GS|VIRTUAL ACCOUNT - NON BCA":      gs_va_nonbca.reindex(idx_set, fill_value=0.0),
+            "GS|E-MONEY":                        gs_emoney.reindex(idx_set, fill_value=0.0),
+            "ON|VIRTUAL ACCOUNT - BCA":          on_va_bca.reindex(idx_set, fill_value=0.0),
+            "ON|VIRTUAL ACCOUNT - NON BCA":      on_va_nonbca.reindex(idx_set, fill_value=0.0),
+            "ON|E-MONEY":                        on_emoney.reindex(idx_set, fill_value=0.0),
+        }
+
+        detail_settle = pd.DataFrame(index=idx_set)
+        for k, ser in cols_det.items():
+            detail_settle[k] = ser.values
+
+        # Render dengan header bertingkat
+        df3 = detail_settle.reset_index()
+        df3.insert(0, "NO", range(1, len(df3) + 1))
+
+        # Baris TOTAL di bawah
+        total_row = {"NO": "", "Tanggal": "TOTAL"}
+        for k in detail_settle.columns:
+            total_row[k] = float(detail_settle[k].sum())
+        df3 = pd.concat([df3, pd.DataFrame([total_row])], ignore_index=True)
+
+        # Format rupiah
+        df3_fmt = df3.copy()
+        for c in df3_fmt.columns:
+            if c in ("NO", "Tanggal"):
+                continue
+            df3_fmt[c] = df3_fmt[c].apply(_idr_fmt)
+
+        # MultiIndex header: GO SHOW & ONLINE
+        def _split_head(col_name: str) -> tuple[str, str]:
+            if col_name.startswith("GS|"):
+                return ("GO SHOW", col_name[3:])
+            if col_name.startswith("ON|"):
+                return ("ONLINE", col_name[3:])
+            return ("", col_name)
+
+        ordered = [k for k in detail_settle.columns if k.startswith("GS|")] + \
+                  [k for k in detail_settle.columns if k.startswith("ON|")]
+
+        df3_fmt = df3_fmt[["NO", "Tanggal"] + ordered]
+        top3 = [("", "NO"), ("", "Tanggal")] + [_split_head(k) for k in ordered]
+        df3_fmt_mi = df3_fmt.copy()
+        df3_fmt_mi.columns = pd.MultiIndex.from_tuples(top3)
+
+        st.dataframe(df3_fmt_mi, use_container_width=True, hide_index=True)
+
+        # ------------------- Download Excel (Detail Settlement) -------------------
+        from openpyxl.styles import Alignment, Font
+        from openpyxl.utils import get_column_letter
+
+        bio_settle = io.BytesIO()
+        with pd.ExcelWriter(bio_settle, engine="openpyxl") as xw3:
+            # Sheet 1: angka mentah
+            df3.to_excel(xw3, index=False, sheet_name="Detail_Settlement")
+
+            # Sheet 2: tampilan dengan header merger 2 baris
+            wsname3 = "Detail_Settlement_View"
+            df3_fmt.to_excel(xw3, index=False, header=False, sheet_name=wsname3, startrow=2)
+            wb3 = xw3.book
+            ws3 = wb3[wsname3]
+
+            # Susun header 2 baris
+            cols3 = list(df3.columns)  # mengikuti urutan df3_fmt
+            top_headers = []
+            sub_headers = []
+            for c in cols3:
+                if c in ("NO","Tanggal"):
+                    top_headers.append("")
+                    sub_headers.append(c)
+                elif c.startswith("GS|"):
+                    top_headers.append("GO SHOW")
+                    sub_headers.append(c[3:])
+                elif c.startswith("ON|"):
+                    top_headers.append("ONLINE")
+                    sub_headers.append(c[3:])
+                else:
+                    top_headers.append("")
+                    sub_headers.append(c)
+
+            # tulis header baris 1 & 2
+            for j, (top, sub) in enumerate(zip(top_headers, sub_headers), start=1):
+                ws3.cell(row=1, column=j, value=top)
+                ws3.cell(row=2, column=j, value=sub)
+
+            # Merge horizontal untuk label berulang (GO SHOW / ONLINE)
+            def _merge_same_run(labels, row_idx):
+                start = 0
+                while start < len(labels):
+                    end = start
+                    while end + 1 < len(labels) and labels[end + 1] == labels[start]:
+                        end += 1
+                    label = labels[start]
+                    if label not in ("", None) and end >= start:
+                        ws3.merge_cells(start_row=row_idx, start_column=start + 1,
+                                        end_row=row_idx, end_column=end + 1)
+                    start = end + 1
+            _merge_same_run(top_headers, row_idx=1)
+
+            # Merge vertikal untuk NO & Tanggal
+            for j, (top, sub) in enumerate(zip(top_headers, sub_headers), start=1):
+                if top == "":
+                    ws3.merge_cells(start_row=1, start_column=j, end_row=2, end_column=j)
+
+            # Style header
+            max_col = len(cols3)
+            for ccol in range(1, max_col + 1):
+                ws3.cell(row=1, column=ccol).font = Font(bold=True)
+                ws3.cell(row=2, column=ccol).font = Font(bold=True)
+                ws3.cell(row=1, column=ccol).alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+                ws3.cell(row=2, column=ccol).alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+            ws3.row_dimensions[1].height = 22
+            ws3.row_dimensions[2].height = 22
+
+            # Lebar kolom otomatis sederhana
+            sample_rows = min(50, df3_fmt.shape[0])
+            for idx_col, col_name in enumerate(cols3, start=1):
+                max_len = max(len(str(col_name)), len(str(sub_headers[idx_col-1])), len(str(top_headers[idx_col-1])))
+                for r in range(3, 3 + sample_rows):
+                    v = ws3.cell(row=r, column=idx_col).value
+                    if v is not None:
+                        max_len = max(max_len, len(str(v)))
+                ws3.column_dimensions[get_column_letter(idx_col)].width = min(max(10, max_len + 2), 45)
+
+        st.download_button(
+            "Unduh Excel (Detail Settlement)",
+            data=bio_settle.getvalue(),
+            file_name=f"detail_settlement_{y}-{m:02d}.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            use_container_width=True,
+        )
