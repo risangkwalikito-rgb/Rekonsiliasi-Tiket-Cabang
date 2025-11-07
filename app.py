@@ -673,10 +673,11 @@ if go:
         m_go_show = (main_norm_all == "go show") | main_norm_all.str.contains(r"\bgo\s*show\b", na=False)
         m_online  = (main_norm_all == "online")  | main_norm_all.str.contains(r"\bonline\b",    na=False)
 
-        # Mask Sub-Tipe (toleran variasi)
+        # Mask Sub-Tipe
         m_prepaid_all  = (sub_norm_all == "prepaid") | sub_norm_all.str.contains(r"\bprepaid\b", na=False)
         m_emoney_all   = (sub_norm_all == "e-money") | sub_norm_all.str.contains(r"\be[-\s]*money\b|\bemoney\b", na=False)
         m_varetail_all = sub_norm_all.str.contains(r"virtual\s*account", na=False) & sub_norm_all.str.contains(r"gerai|retail", na=False)
+        m_cash_all     = (sub_norm_all == "cash") | sub_norm_all.str.contains(r"\bcash\b", na=False)
 
         # Kalender indeks 1..akhir bulan
         idx2 = pd.Index(pd.date_range(month_start, month_end, freq="D").date, name="Tanggal")
@@ -686,14 +687,16 @@ if go:
         gs_sub  = m_prepaid_all
         gs_emo  = m_emoney_all
         gs_var  = m_varetail_all
+        gs_cash = m_cash_all
         gs_bank = bank_norm_all
 
-        s_gs_prepaid_bca     = gs.loc[m_go_show & gs_sub & (gs_bank == "bca")    ].groupby(gs[date_col].dt.date, dropna=True)[tarif_col].sum()
-        s_gs_prepaid_bri     = gs.loc[m_go_show & gs_sub & (gs_bank == "bri")    ].groupby(gs[date_col].dt.date, dropna=True)[tarif_col].sum()
-        s_gs_prepaid_bni     = gs.loc[m_go_show & gs_sub & (gs_bank == "bni")    ].groupby(gs[date_col].dt.date, dropna=True)[tarif_col].sum()
-        s_gs_prepaid_mandiri = gs.loc[m_go_show & gs_sub & (gs_bank == "mandiri")].groupby(gs[date_col].dt.date, dropna=True)[tarif_col].sum()
-        s_gs_emoney_espay    = gs.loc[m_go_show & gs_emo & (gs_bank == "espay")  ].groupby(gs[date_col].dt.date, dropna=True)[tarif_col].sum()
-        s_gs_varetail_espay  = gs.loc[m_go_show & gs_var & (gs_bank == "espay")  ].groupby(gs[date_col].dt.date, dropna=True)[tarif_col].sum()
+        s_gs_prepaid_bca     = gs.loc[m_go_show & gs_sub  & (gs_bank == "bca")    ].groupby(gs[date_col].dt.date, dropna=True)[tarif_col].sum()
+        s_gs_prepaid_bri     = gs.loc[m_go_show & gs_sub  & (gs_bank == "bri")    ].groupby(gs[date_col].dt.date, dropna=True)[tarif_col].sum()
+        s_gs_prepaid_bni     = gs.loc[m_go_show & gs_sub  & (gs_bank == "bni")    ].groupby(gs[date_col].dt.date, dropna=True)[tarif_col].sum()
+        s_gs_prepaid_mandiri = gs.loc[m_go_show & gs_sub  & (gs_bank == "mandiri")].groupby(gs[date_col].dt.date, dropna=True)[tarif_col].sum()
+        s_gs_emoney_espay    = gs.loc[m_go_show & gs_emo  & (gs_bank == "espay")  ].groupby(gs[date_col].dt.date, dropna=True)[tarif_col].sum()
+        s_gs_varetail_espay  = gs.loc[m_go_show & gs_var  & (gs_bank == "espay")  ].groupby(gs[date_col].dt.date, dropna=True)[tarif_col].sum()
+        s_gs_cash_asdp       = gs.loc[m_go_show & gs_cash & (gs_bank == "asdp")   ].groupby(gs[date_col].dt.date, dropna=True)[tarif_col].sum()
 
         go_show_cols = {
             "PREPAID - BCA":     s_gs_prepaid_bca.reindex(idx2, fill_value=0.0),
@@ -702,6 +705,7 @@ if go:
             "PREPAID - MANDIRI": s_gs_prepaid_mandiri.reindex(idx2, fill_value=0.0),
             "E-MONEY - ESPAY":   s_gs_emoney_espay.reindex(idx2, fill_value=0.0),
             "VIRTUAL ACCOUNT DAN GERAI RETAIL - ESPAY": s_gs_varetail_espay.reindex(idx2, fill_value=0.0),
+            "CASH - ASDP":       s_gs_cash_asdp.reindex(idx2, fill_value=0.0),
         }
 
         # ================= ONLINE (rumus semula; TANPA drop_duplicates) =================
@@ -711,14 +715,17 @@ if go:
 
         m_emoney_on     = ((on_sub == "e-money") | on_sub.str.contains(r"\be[-\s]*money\b|\bemoney\b", na=False))
         m_varetail_on   = on_sub.str.contains(r"virtual\s*account", na=False) & on_sub.str.contains(r"gerai|retail", na=False)
+        m_cash_on       = (on_sub == "cash") | on_sub.str.contains(r"\bcash\b", na=False)
         m_bank_espay_on = (on_bank == "espay")
 
-        s_on_emoney_espay   = on.loc[m_online & m_bank_espay_on & m_emoney_on]  .groupby(on[date_col].dt.date, dropna=True)[tarif_col].sum()
+        s_on_emoney_espay   = on.loc[m_online & m_bank_espay_on & m_emoney_on] .groupby(on[date_col].dt.date, dropna=True)[tarif_col].sum()
         s_on_varetail_espay = on.loc[m_online & m_bank_espay_on & m_varetail_on].groupby(on[date_col].dt.date, dropna=True)[tarif_col].sum()
+        s_on_cash_asdp      = on.loc[m_online & m_cash_on       & (on_bank == "asdp")]  .groupby(on[date_col].dt.date, dropna=True)[tarif_col].sum()
 
         online_cols = {
             "E-MONEY - ESPAY":                        s_on_emoney_espay.reindex(idx2, fill_value=0.0),
             "VIRTUAL ACCOUNT & GERAI RETAIL - ESPAY": s_on_varetail_espay.reindex(idx2, fill_value=0.0),
+            "CASH - ASDP":                            s_on_cash_asdp.reindex(idx2, fill_value=0.0),
         }
 
         # ===== Gabungkan + SUBTOTAL per grup + GRAND TOTAL =====
@@ -727,7 +734,7 @@ if go:
         # Tambah kolom GO SHOW
         for k, ser in go_show_cols.items():
             detail_mix[f"GS|{k}"] = ser.values
-        # Subtotal GO SHOW (per tanggal)
+        # Subtotal GO SHOW
         gs_df        = pd.DataFrame(go_show_cols, index=idx2)
         gs_subtotal  = gs_df.sum(axis=1) if not gs_df.empty else pd.Series(0.0, index=idx2)
         detail_mix["GS|SUBTOTAL"] = gs_subtotal.values
@@ -735,12 +742,12 @@ if go:
         # Tambah kolom ONLINE
         for k, ser in online_cols.items():
             detail_mix[f"ON|{k}"] = ser.values
-        # Subtotal ONLINE (per tanggal)
+        # Subtotal ONLINE
         on_df        = pd.DataFrame(online_cols, index=idx2)
         on_subtotal  = on_df.sum(axis=1) if not on_df.empty else pd.Series(0.0, index=idx2)
         detail_mix["ON|SUBTOTAL"] = on_subtotal.values
 
-        # GRAND TOTAL = SUBTOTAL GO SHOW + SUBTOTAL ONLINE (per tanggal)
+        # GRAND TOTAL
         detail_mix["GT|GRAND TOTAL"] = detail_mix["GS|SUBTOTAL"] + detail_mix["ON|SUBTOTAL"]
 
         # === Render dengan header bertingkat: GO SHOW | ONLINE | GRAND TOTAL ===
@@ -748,31 +755,29 @@ if go:
         df2 = detail_mix.reset_index()
         df2.insert(0, "NO", range(1, len(df2) + 1))
 
-        # Baris TOTAL (subtotal bawah tabel)
+        # TOTAL baris bawah
         total_row = {"NO": "", "Tanggal": "TOTAL"}
         for k in detail_mix.columns:
             total_row[k] = float(detail_mix[k].sum())
         df2 = pd.concat([df2, pd.DataFrame([total_row])], ignore_index=True)
 
-        # Format rupiah
+        # Format Rupiah
         df2_fmt = df2.copy()
         for c in df2_fmt.columns:
             if c in ("NO", "Tanggal"):
                 continue
             df2_fmt[c] = df2_fmt[c].apply(_idr_fmt)
 
-        # MultiIndex columns: ("GO SHOW", ...), ("ONLINE", ...), ("GRAND TOTAL", <merged 2 baris>)
+        # MultiIndex columns
         def _strip_prefix(col_name: str) -> tuple[str, str]:
             if col_name.startswith("GS|"):
                 return ("GO SHOW", col_name[3:])
             if col_name.startswith("ON|"):
                 return ("ONLINE", col_name[3:])
             if col_name.startswith("GT|"):
-                # header 2 baris 'merged' untuk GRAND TOTAL (baris bawah kosong)
                 return ("GRAND TOTAL", "")
             return ("", col_name)
 
-        # urutan: NO, Tanggal, GO SHOW..., GS SUBTOTAL, ONLINE..., ON SUBTOTAL, GRAND TOTAL
         ordered_keys = [k for k in detail_mix.columns if k.startswith("GS|") and k != "GS|SUBTOTAL"] \
                      + ["GS|SUBTOTAL"] \
                      + [k for k in detail_mix.columns if k.startswith("ON|") and k != "ON|SUBTOTAL"] \
@@ -780,105 +785,11 @@ if go:
                      + ["GT|GRAND TOTAL"]
 
         df2_fmt = df2_fmt[["NO", "Tanggal"] + ordered_keys]
-
         top = [("", "NO"), ("", "Tanggal")] + [ _strip_prefix(k) for k in ordered_keys ]
         df2_fmt_mi = df2_fmt.copy()
         df2_fmt_mi.columns = pd.MultiIndex.from_tuples(top)
 
         st.dataframe(df2_fmt_mi, use_container_width=True, hide_index=True)
-
-        # ------------------- Download Excel (Detail Tiket) saja -------------------
-        from openpyxl.styles import Alignment, Font
-        from openpyxl.utils import get_column_letter
-
-        bio_detail = io.BytesIO()
-        with pd.ExcelWriter(bio_detail, engine="openpyxl") as xw2:
-            # Sheet 1: angka mentah
-            df2.to_excel(xw2, index=False, sheet_name="Detail_Tiket")
-
-            # Sheet 2: tampilan dengan header merger 2 baris
-            wsname = "Detail_Tiket_View"
-            # Tulis body tanpa header (mulai baris ke-3)
-            df2_fmt.to_excel(xw2, index=False, header=False, sheet_name=wsname, startrow=2)
-            wb2 = xw2.book
-            ws2 = wb2[wsname]
-
-            # Susun header baris-atas (kelompok) & baris-bawah (sub kolom)
-            # Ambil kolom dari df2 (raw) agar urutan konsisten dengan body yang ditulis
-            cols = list(df2.columns)  # ["NO","Tanggal","GS|...","ON|...","GT|GRAND TOTAL",...]
-            top_headers = []
-            sub_headers = []
-            for c in cols:
-                if c in ("NO", "Tanggal"):
-                    top_headers.append("")            # akan di-merge vertikal
-                    sub_headers.append(c)
-                elif c.startswith("GS|"):
-                    top_headers.append("GO SHOW")
-                    sub_headers.append(c[3:])
-                elif c.startswith("ON|"):
-                    top_headers.append("ONLINE")
-                    sub_headers.append(c[3:])
-                elif c.startswith("GT|"):
-                    top_headers.append("GRAND TOTAL")
-                    sub_headers.append("")           # merge vertikal (2 baris)
-                else:
-                    top_headers.append("")
-                    sub_headers.append(c)
-
-            # Tulis header baris 1 & 2
-            for j, (top, sub) in enumerate(zip(top_headers, sub_headers), start=1):
-                ws2.cell(row=1, column=j, value=top)
-                ws2.cell(row=2, column=j, value=sub)
-
-            # Merge horizontal untuk grup yang sama di baris-atas (GO SHOW / ONLINE)
-            def _merge_same_run(labels, row_idx):
-                start = 0
-                while start < len(labels):
-                    end = start
-                    while end + 1 < len(labels) and labels[end + 1] == labels[start]:
-                        end += 1
-                    label = labels[start]
-                    if label not in ("", None) and end >= start:
-                        ws2.merge_cells(start_row=row_idx, start_column=start + 1,
-                                        end_row=row_idx, end_column=end + 1)
-                    start = end + 1
-
-            _merge_same_run(top_headers, row_idx=1)
-
-            # Merge vertikal untuk kolom yang memang 1 kolom (NO, Tanggal) dan GRAND TOTAL
-            for j, (top, sub) in enumerate(zip(top_headers, sub_headers), start=1):
-                if top == "" or (top == "GRAND TOTAL" and sub == ""):
-                    ws2.merge_cells(start_row=1, start_column=j, end_row=2, end_column=j)
-
-            # Gaya header
-            max_col = len(cols)
-            for c in range(1, max_col + 1):
-                ws2.cell(row=1, column=c).font = Font(bold=True)
-                ws2.cell(row=2, column=c).font = Font(bold=True)
-                ws2.cell(row=1, column=c).alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
-                ws2.cell(row=2, column=c).alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
-
-            ws2.row_dimensions[1].height = 22
-            ws2.row_dimensions[2].height = 22
-
-            # Lebar kolom otomatis sederhana
-            # (ambil lebar maksimum dari header & beberapa baris awal body)
-            sample_rows = min(50, df2_fmt.shape[0])
-            for idx_col, col_name in enumerate(cols, start=1):
-                max_len = max(len(str(col_name)), len(str(sub_headers[idx_col-1])), len(str(top_headers[idx_col-1])))
-                for r in range(3, 3 + sample_rows):
-                    v = ws2.cell(row=r, column=idx_col).value
-                    if v is not None:
-                        max_len = max(max_len, len(str(v)))
-                ws2.column_dimensions[get_column_letter(idx_col)].width = min(max(10, max_len + 2), 45)
-
-        st.download_button(
-            "Unduh Excel (Detail Tiket)",
-            data=bio_detail.getvalue(),
-            file_name=f"detail_tiket_{y}-{m:02d}.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            use_container_width=True,
-        )
 
        # ======================================================================
     # ===================  TABEL: DETAIL SETTLEMENT REPORT  =================
