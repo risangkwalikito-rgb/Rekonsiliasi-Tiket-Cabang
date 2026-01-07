@@ -1,13 +1,18 @@
 # app.py
 # -*- coding: utf-8 -*-
 """
-Rekonsiliasi: Tiket Detail vs Settlement Dana (FAST VERSION)
+Rekonsiliasi: Tiket Detail vs Settlement Dana (FAST + FIX FORMAT)
 Optimasi utama:
-- Baca & concat file hanya saat tombol "Proses" ditekan (hindari rerun Streamlit yang mahal)
+- Baca & concat file hanya saat tombol "Proses" ditekan (hindari rerun Streamlit mahal)
 - Cache pembacaan file berbasis (filename, bytes), termasuk isi ZIP
-- Parsing tanggal & uang dibuat semi-vectorized (fallback apply hanya untuk sisa yang gagal)
+- Parsing tanggal & uang semi-vectorized (fallback apply hanya untuk sisa yang gagal)
 - Groupby pakai Timestamp normalize (hindari .dt.date object)
-- Detail Tiket & Detail Settlement pakai pivot_table (1x scan, bukan banyak groupby)
+- Detail Tiket & Detail Settlement pakai pivot_table (1x scan)
+
+Fix error TypeError saat format:
+- _idr_fmt tahan banting (non-angka tidak dibandingkan <0)
+- Kolom display df2/df3 dipaksa jadi MultiIndex konsisten, NO/Tanggal jadi ("","NO") & ("","Tanggal")
+- Format Rupiah hanya untuk kolom numeric
 """
 
 from __future__ import annotations
@@ -66,11 +71,9 @@ def _to_num_fast(sr: pd.Series) -> pd.Series:
         return pd.Series(dtype=float)
 
     if pd.api.types.is_numeric_dtype(sr):
-        out = pd.to_numeric(sr, errors="coerce").fillna(0.0).astype(float)
-        return out
+        return pd.to_numeric(sr, errors="coerce").fillna(0.0).astype(float)
 
     s = sr.astype(str).str.strip()
-    # treat empty / "nan"
     s2 = s.replace({"": np.nan, "nan": np.nan, "None": np.nan})
 
     neg = s.str.match(r"^\(.*\)$") | s.str.endswith("-") | s.str.startswith("-")
@@ -95,7 +98,6 @@ def _to_num_fast(sr: pd.Series) -> pd.Series:
             errors="coerce",
         )
 
-    # Fallback hanya untuk yang masih NaN tapi aslinya ada isi
     need_fallback = out.isna() & s2.notna()
     if need_fallback.any():
         out.loc[need_fallback] = s2.loc[need_fallback].apply(_parse_money)
@@ -107,7 +109,7 @@ def _to_num_fast(sr: pd.Series) -> pd.Series:
 _ddmmyyyy = re.compile(r"\b(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{2,4})\b")
 
 def _to_date_series_fast(sr: pd.Series) -> pd.Series:
-    """Parser tanggal cepat: excel serial + pandas to_datetime (dayfirst True/False) + fallback dateutil untuk sisa."""
+    """Parser tanggal cepat: excel serial + pandas to_datetime + fallback dateutil untuk sisa."""
     if sr is None:
         return pd.Series(dtype="datetime64[ns]")
 
@@ -116,7 +118,6 @@ def _to_date_series_fast(sr: pd.Series) -> pd.Series:
 
     s = sr.copy()
 
-    # excel serial
     num = pd.to_numeric(s, errors="coerce")
     out = pd.Series(pd.NaT, index=sr.index)
 
@@ -124,32 +125,27 @@ def _to_date_series_fast(sr: pd.Series) -> pd.Series:
     if mask_serial.any():
         out.loc[mask_serial] = (pd.Timestamp("1899-12-30") + pd.to_timedelta(num[mask_serial], unit="D")).dt.normalize()
 
-    # dd/mm/yyyy quick detect -> construct safely (faster than dateutil)
     mask_rest = ~mask_serial
     if mask_rest.any():
         ss = s.loc[mask_rest].astype(str).str.strip()
-        # try pandas dayfirst
         parsed = pd.to_datetime(ss, errors="coerce", dayfirst=True)
-        # try non-dayfirst for remaining
         remain = parsed.isna() & ss.ne("")
         if remain.any():
             parsed2 = pd.to_datetime(ss[remain], errors="coerce", dayfirst=False)
             parsed.loc[remain] = parsed2
-
         out.loc[mask_rest] = parsed.dt.normalize()
 
-    # fallback dateutil only for remaining NaT where string non-empty
     need_fallback = out.isna() & sr.notna()
     if need_fallback.any():
         def _fallback_one(v):
             if pd.isna(v):
                 return pd.NaT
-            s = str(v).strip()
-            if not s:
+            s0 = str(v).strip()
+            if not s0:
                 return pd.NaT
-            m = _ddmmyyyy.search(s)
-            if m:
-                d, M, y = m.groups()
+            m0 = _ddmmyyyy.search(s0)
+            if m0:
+                d, M, y = m0.groups()
                 if len(y) == 2:
                     y = "20" + y
                 try:
@@ -158,12 +154,11 @@ def _to_date_series_fast(sr: pd.Series) -> pd.Series:
                     pass
             for dayfirst in (True, False):
                 try:
-                    d = dtparser.parse(s, dayfirst=dayfirst, fuzzy=True)
-                    return pd.Timestamp(d.date())
+                    d0 = dtparser.parse(s0, dayfirst=dayfirst, fuzzy=True)
+                    return pd.Timestamp(d0.date())
                 except Exception:
                     continue
             return pd.NaT
-
         out.loc[need_fallback] = sr.loc[need_fallback].apply(_fallback_one)
 
     return pd.to_datetime(out, errors="coerce").dt.normalize()
@@ -175,12 +170,18 @@ def _norm_str(val) -> str:
     return s.strip().lower()
 
 def _norm_series_simple(sr: pd.Series) -> pd.Series:
-    # jauh lebih cepat daripada remove-diacritics untuk kolom bank/status
     return sr.astype(str).str.strip().str.casefold()
 
-def _idr_fmt(n: float) -> str:
-    if pd.isna(n):
+def _idr_fmt(val) -> str:
+    """Format angka ke IDR. Kalau val bukan angka (tanggal/teks), kembalikan string apa adanya."""
+    if val is None:
         return "-"
+    if isinstance(val, float) and np.isnan(val):
+        return "-"
+    try:
+        n = float(val)
+    except Exception:
+        return str(val)
     neg = n < 0
     s = f"{abs(int(round(n))):,}".replace(",", ".")
     return f"({s})" if neg else s
@@ -273,11 +274,10 @@ def _read_any(file_like) -> pd.DataFrame:
 def _read_any_bytes(name: str, data: bytes) -> pd.DataFrame:
     bio = io.BytesIO(data)
     bio.name = name
-    df = _read_any(bio)
-    return df
+    return _read_any(bio)
 
 def _expand_zip_to_pairs(files) -> List[Tuple[str, bytes]]:
-    """Return list of (name, bytes) for uploaded files; if zip, expand allowed ext."""
+    """Return list of (name, bytes); if zip, expand allowed ext."""
     out: List[Tuple[str, bytes]] = []
     allow_ext = (".csv", ".xls", ".xlsx")
 
@@ -286,7 +286,6 @@ def _expand_zip_to_pairs(files) -> List[Tuple[str, bytes]]:
             f.seek(0)
             data = f.read()
         except Exception:
-            # fallback streamlit uploaded file
             data = f.getvalue()
 
         fname = (getattr(f, "name", "") or "").lower()
@@ -332,7 +331,6 @@ def _promote_header(df: pd.DataFrame) -> pd.DataFrame:
         score = sum(any(k in v for k in keys) for v in vals)
         return score >= 2
 
-    # try common row 13/14 (0-index 12/13), then scan first 50
     for r in (12, 13):
         if r < len(df) and _is_header_row(df.iloc[r]):
             cols = [str(x).strip() for x in df.iloc[r].tolist()]
@@ -388,6 +386,17 @@ def _month_selector() -> Tuple[int, int]:
         month = int(month_label[0])
     return year, month
 
+def _force_multiindex_cols(df: pd.DataFrame) -> pd.DataFrame:
+    """Pastikan semua columns menjadi MultiIndex tuple, NO/Tanggal jadi ("","NO") & ("","Tanggal") bila string."""
+    cols = []
+    for c in df.columns:
+        if isinstance(c, tuple):
+            cols.append(c)
+        else:
+            cols.append(("", str(c)))
+    df.columns = pd.MultiIndex.from_tuples(cols)
+    return df
+
 # =========================
 # App
 # =========================
@@ -426,9 +435,6 @@ if go:
     rk_bca_df = _concat_files_cached(rk_bca_pairs)
     rk_non_df = _concat_rk_non_cached(rk_non_pairs)
 
-    # =========================
-    # VALIDASI minimal
-    # =========================
     if tiket_df.empty:
         st.error("Tiket Detail kosong / belum diupload.")
         st.stop()
@@ -475,24 +481,17 @@ if go:
     # TABEL 1: TIKET DETAIL ESPAY (Bank=ESPAY, St Bayar=paid)
     # =========================
     td = tiket_df[[t_date_action, t_amt_tarif, t_bank, t_stat]].copy()
-
     td[t_date_action] = _to_date_series_fast(td[t_date_action])
     td = td[td[t_date_action].notna()]
 
-    # filter bank + status (pakai normalisasi cepat)
     bank_norm = _norm_series_simple(td[t_bank])
     stat_norm = _norm_series_simple(td[t_stat])
     td = td[(bank_norm == "espay") & (stat_norm == "paid")]
 
-    # filter periode
     td = td[(td[t_date_action] >= month_start) & (td[t_date_action] <= month_end)]
-
-    # nominal
     td[t_amt_tarif] = _to_num_fast(td[t_amt_tarif])
 
-    # drop duplicate identik (multi-file)
     td = td.drop_duplicates()
-
     td["_DATE"] = td[t_date_action].dt.normalize()
     tiket_by_date = td.groupby("_DATE", sort=False)[t_amt_tarif].sum()
 
@@ -565,11 +564,13 @@ if go:
             uang_masuk_non = nb.groupby("_DATE", sort=False)[rk_amt_non].sum()
 
     # =========================
-    # Susun index tanggal 1..akhir bulan (DatetimeIndex)
+    # Index tanggal 1..akhir bulan (DatetimeIndex)
     # =========================
     idx = pd.date_range(month_start, month_end, freq="D")
+
     tiket_series = tiket_by_date.reindex(idx, fill_value=0.0)
     settle_series = settle_by_date_total.reindex(idx, fill_value=0.0)
+
     bca_series = bca_series.reindex(idx, fill_value=0.0)
     non_bca_series = non_bca_series.reindex(idx, fill_value=0.0)
     total_settle_ser = (bca_series + non_bca_series).reindex(idx, fill_value=0.0)
@@ -627,13 +628,16 @@ if go:
     for c in ordered_cols:
         if c in ("NO", "TANGGAL"):
             continue
-        fmt[c] = fmt[c].apply(_idr_fmt)
+        if pd.api.types.is_numeric_dtype(fmt[c]):
+            fmt[c] = fmt[c].map(_idr_fmt)
+        else:
+            fmt[c] = fmt[c].apply(_idr_fmt)
 
     st.subheader("Hasil Rekonsiliasi per Tanggal (mengikuti bulan parameter)")
     st.dataframe(fmt, use_container_width=True, hide_index=True)
 
     # =========================
-    # Export Rekonsiliasi (cache in session_state)
+    # Export Rekonsiliasi
     # =========================
     from openpyxl.styles import Alignment, Font
 
@@ -676,11 +680,9 @@ if go:
         ws.row_dimensions[1].height = 22
         ws.row_dimensions[2].height = 22
 
-    st.session_state["rekon_bytes"] = bio.getvalue()
-
     st.download_button(
         "Unduh Excel",
-        data=st.session_state["rekon_bytes"],
+        data=bio.getvalue(),
         file_name=f"rekonsiliasi_{y}-{m:02d}.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         use_container_width=True,
@@ -727,12 +729,9 @@ if go:
         st.warning("Kolom wajib untuk tabel 'Detail Tiket (GO SHOW/ONLINE)' belum lengkap: " + ", ".join(required_missing))
     else:
         tix = tiket_df[[type_main_col, bank_col, type_sub_col, date_col, tarif_col]].copy()
-
         tix[date_col] = _to_date_series_fast(tix[date_col])
         tix = tix[tix[date_col].notna()]
         tix = tix[(tix[date_col] >= month_start) & (tix[date_col] <= month_end)]
-
-        # Semua status (tidak filter St Bayar)
         tix[tarif_col] = _to_num_fast(tix[tarif_col])
 
         main_norm = tix[type_main_col].astype(str).str.strip().str.casefold()
@@ -747,7 +746,6 @@ if go:
         m_varetail = sub_norm.str.contains(r"virtual\s*account", na=False) & sub_norm.str.contains(r"gerai|retail", na=False)
         m_cash     = (sub_norm == "cash") | sub_norm.str.contains(r"\bcash\b", na=False)
 
-        # label final (hanya yang relevan seperti versi lama)
         label = pd.Series("", index=tix.index)
 
         # GO SHOW
@@ -781,7 +779,6 @@ if go:
             fill_value=0.0,
         ).reindex(idx2, fill_value=0.0)
 
-        # Pastikan kolom urut sama seperti versi lama
         gs_order = [
             "PREPAID - BCA", "PREPAID - BRI", "PREPAID - BNI", "PREPAID - MANDIRI",
             "E-MONEY - ESPAY", "VIRTUAL ACCOUNT DAN GERAI RETAIL - ESPAY", "CASH - ASDP",
@@ -790,19 +787,15 @@ if go:
             "E-MONEY - ESPAY", "VIRTUAL ACCOUNT & GERAI RETAIL - ESPAY", "CASH - ASDP",
         ]
 
-        # Build output matrix
-        out_cols = []
-
-        def _ensure_cols(main_name: str, labels: List[str]):
-            for lab in labels:
+        def _ensure_cols(main_name: str, labels_list: List[str]):
+            for lab in labels_list:
                 if (main_name, lab) not in pt.columns:
                     pt[(main_name, lab)] = 0.0
 
         _ensure_cols("GO SHOW", gs_order)
         _ensure_cols("ONLINE", on_order)
 
-        pt = pt.sort_index(axis=1)
-
+        # build output df2 (MultiIndex columns)
         gs = pt["GO SHOW"][gs_order].copy()
         on = pt["ONLINE"][on_order].copy()
 
@@ -810,37 +803,35 @@ if go:
         on_subtotal = on.sum(axis=1)
         grand_total = gs_subtotal + on_subtotal
 
-        # Render multiindex columns (GO SHOW / ONLINE / GRAND TOTAL)
         df2 = pd.DataFrame(index=idx2)
         for c in gs_order:
             df2[("GO SHOW", c)] = gs[c].values
         df2[("GO SHOW", "SUBTOTAL")] = gs_subtotal.values
-
         for c in on_order:
             df2[("ONLINE", c)] = on[c].values
         df2[("ONLINE", "SUBTOTAL")] = on_subtotal.values
-
         df2[("GRAND TOTAL", "GRAND TOTAL")] = grand_total.values
 
         st.subheader("Detail Tiket per Tanggal — TYPE: GO SHOW & ONLINE × SUB-TIPE (J) [SEMUA STATUS]")
 
-        df2_view = df2.reset_index()
-        df2_view.rename(columns={"index": "Tanggal"}, inplace=True)
+        df2_view = df2.reset_index().rename(columns={"index": "Tanggal"})
         df2_view["Tanggal"] = pd.to_datetime(df2_view["Tanggal"]).dt.date
-        df2_view.insert(0, ("", "NO"), range(1, len(df2_view) + 1))
+        df2_view.insert(0, "NO", range(1, len(df2_view) + 1))
+        df2_view = _force_multiindex_cols(df2_view)  # <-- FIX: konsisten MultiIndex
 
-        # tambah TOTAL row
+        # total row (pakai MultiIndex key)
         total_row = {("", "NO"): "", ("", "Tanggal"): "TOTAL"}
         for col in df2.columns:
             total_row[col] = float(df2[col].sum())
         df2_view = pd.concat([df2_view, pd.DataFrame([total_row])], ignore_index=True)
 
-        # format rupiah
+        # format rupiah hanya numeric & skip NO/Tanggal
         df2_fmt = df2_view.copy()
         for col in df2_fmt.columns:
             if col in [("", "NO"), ("", "Tanggal")]:
                 continue
-            df2_fmt[col] = df2_fmt[col].apply(_idr_fmt)
+            if pd.api.types.is_numeric_dtype(df2_fmt[col]):
+                df2_fmt[col] = df2_fmt[col].map(_idr_fmt)
 
         st.dataframe(df2_fmt, use_container_width=True, hide_index=True)
 
@@ -890,26 +881,22 @@ if go:
             fill_value=0.0,
         ).reindex(idx_set, fill_value=0.0)
 
-        # ensure columns exist & order
         det_order = ["VIRTUAL ACCOUNT - BCA", "VIRTUAL ACCOUNT - NON BCA", "E-MONEY"]
         for mname in ["GO SHOW", "ONLINE"]:
             for lab in det_order:
                 if (mname, lab) not in pt2.columns:
                     pt2[(mname, lab)] = 0.0
 
-        pt2 = pt2.sort_index(axis=1)
-
-        # build view df3 with MultiIndex columns + total row
         df3 = pd.DataFrame(index=idx_set)
         for lab in det_order:
             df3[("GO SHOW", lab)] = pt2["GO SHOW"][lab].values
         for lab in det_order:
             df3[("ONLINE", lab)] = pt2["ONLINE"][lab].values
 
-        df3_view = df3.reset_index()
-        df3_view.rename(columns={"index": "Tanggal"}, inplace=True)
+        df3_view = df3.reset_index().rename(columns={"index": "Tanggal"})
         df3_view["Tanggal"] = pd.to_datetime(df3_view["Tanggal"]).dt.date
-        df3_view.insert(0, ("", "NO"), range(1, len(df3_view) + 1))
+        df3_view.insert(0, "NO", range(1, len(df3_view) + 1))
+        df3_view = _force_multiindex_cols(df3_view)  # <-- FIX
 
         total_row = {("", "NO"): "", ("", "Tanggal"): "TOTAL"}
         for col in df3.columns:
@@ -920,7 +907,8 @@ if go:
         for col in df3_fmt.columns:
             if col in [("", "NO"), ("", "Tanggal")]:
                 continue
-            df3_fmt[col] = df3_fmt[col].apply(_idr_fmt)
+            if pd.api.types.is_numeric_dtype(df3_fmt[col]):
+                df3_fmt[col] = df3_fmt[col].map(_idr_fmt)
 
         st.dataframe(df3_fmt, use_container_width=True, hide_index=True)
 
@@ -928,25 +916,20 @@ if go:
         from openpyxl.styles import Alignment, Font
         from openpyxl.utils import get_column_letter
 
-        # siapkan versi flat untuk excel raw
+        # versi flat untuk excel raw
         raw_flat = df3.reset_index().rename(columns={"index": "Tanggal"})
         raw_flat["Tanggal"] = pd.to_datetime(raw_flat["Tanggal"]).dt.date
 
-        # buat header flat "GS|..." "ON|..."
-        flat_cols = ["Tanggal"]
         flat_map = {}
         for col in df3.columns:
-            main, lab = col
-            prefix = "GS|" if main == "GO SHOW" else "ON|"
-            flat_name = prefix + lab
-            flat_cols.append(flat_name)
-            flat_map[col] = flat_name
+            main_name, lab = col
+            prefix = "GS|" if main_name == "GO SHOW" else "ON|"
+            flat_map[col] = prefix + lab
 
-        raw_flat2 = pd.DataFrame({"Tanggal": raw_flat["Tanggal"]})
+        df3_excel = pd.DataFrame({"Tanggal": raw_flat["Tanggal"]})
         for col in df3.columns:
-            raw_flat2[flat_map[col]] = df3[col].values
+            df3_excel[flat_map[col]] = df3[col].values
 
-        df3_excel = raw_flat2.copy()
         df3_excel.insert(0, "NO", range(1, len(df3_excel) + 1))
 
         total_row_excel = {"NO": "", "Tanggal": "TOTAL"}
@@ -960,22 +943,20 @@ if go:
         for c in df3_excel_fmt.columns:
             if c in ("NO", "Tanggal"):
                 continue
-            df3_excel_fmt[c] = df3_excel_fmt[c].apply(_idr_fmt)
+            if pd.api.types.is_numeric_dtype(df3_excel_fmt[c]):
+                df3_excel_fmt[c] = df3_excel_fmt[c].map(_idr_fmt)
 
         bio_settle = io.BytesIO()
         with pd.ExcelWriter(bio_settle, engine="openpyxl") as xw3:
             df3_excel.to_excel(xw3, index=False, sheet_name="Detail_Settlement")
 
             wsname3 = "Detail_Settlement_View"
-            # tulis data formatted mulai row 3 (header 2 baris kita buat manual)
             df3_excel_fmt.to_excel(xw3, index=False, header=False, sheet_name=wsname3, startrow=2)
 
             wb3 = xw3.book
             ws3 = wb3[wsname3]
 
-            # susun header 2 baris berdasarkan prefix
             cols3 = list(df3_excel.columns)
-
             top_headers = []
             sub_headers = []
             for c in cols3:
@@ -996,27 +977,24 @@ if go:
                 ws3.cell(row=1, column=j, value=top)
                 ws3.cell(row=2, column=j, value=sub)
 
-            # merge run top headers
             def _merge_same_run(labels, row_idx):
                 start = 0
                 while start < len(labels):
                     end = start
                     while end + 1 < len(labels) and labels[end + 1] == labels[start]:
                         end += 1
-                    label = labels[start]
-                    if label not in ("", None) and end >= start:
+                    label0 = labels[start]
+                    if label0 not in ("", None) and end >= start:
                         ws3.merge_cells(start_row=row_idx, start_column=start + 1,
                                         end_row=row_idx, end_column=end + 1)
                     start = end + 1
 
             _merge_same_run(top_headers, row_idx=1)
 
-            # merge vertikal untuk NO & Tanggal
             for j, top in enumerate(top_headers, start=1):
                 if top == "":
                     ws3.merge_cells(start_row=1, start_column=j, end_row=2, end_column=j)
 
-            # style header
             max_col = len(cols3)
             for ccol in range(1, max_col + 1):
                 ws3.cell(row=1, column=ccol).font = Font(bold=True)
@@ -1026,7 +1004,6 @@ if go:
             ws3.row_dimensions[1].height = 22
             ws3.row_dimensions[2].height = 22
 
-            # auto width sederhana
             sample_rows = min(50, df3_excel_fmt.shape[0])
             for idx_col, col_name in enumerate(cols3, start=1):
                 max_len = max(len(str(col_name)), len(str(sub_headers[idx_col - 1])), len(str(top_headers[idx_col - 1])))
