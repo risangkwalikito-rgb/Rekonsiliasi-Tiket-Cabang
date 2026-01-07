@@ -3,7 +3,8 @@
 """
 Rekonsiliasi: Tiket Detail vs Settlement Dana
 - PERSIST hasil (tidak hilang saat klik Download → tidak perlu proses ulang)
-- Pengambilan & perhitungan data TIKET DETAIL dikembalikan seperti semula (rumus/groupby semula)
+- Pengambilan & perhitungan data TIKET DETAIL dikembalikan seperti semula
+- Tampilan angka rata kanan (NO center, Tanggal left)
 """
 
 from __future__ import annotations
@@ -196,6 +197,35 @@ def _idr_fmt(val) -> str:
     s = f"{abs(int(round(n))):,}".replace(",", ".")
     return f"({s})" if neg else s
 
+def _style_right(df: pd.DataFrame):
+    """Rata kanan untuk kolom angka/nominal (umumnya semua kecuali NO & Tanggal/TANGGAL)."""
+    if df is None or getattr(df, "empty", True):
+        return df
+
+    cols = list(df.columns)
+
+    def _is_no(col):
+        return (isinstance(col, tuple) and str(col[-1]) == "NO") or (not isinstance(col, tuple) and str(col) == "NO")
+
+    def _is_tgl(col):
+        return (isinstance(col, tuple) and str(col[-1]) in ("TANGGAL", "Tanggal")) or (not isinstance(col, tuple) and str(col) in ("TANGGAL", "Tanggal"))
+
+    no_cols  = [c for c in cols if _is_no(c)]
+    tgl_cols = [c for c in cols if _is_tgl(c)]
+    right_cols = [c for c in cols if c not in set(no_cols + tgl_cols)]
+
+    sty = df.style
+    sty = sty.set_table_styles([{"selector": "th", "props": [("text-align", "center")]}])
+
+    if no_cols:
+        sty = sty.set_properties(subset=no_cols,  **{"text-align": "center"})
+    if tgl_cols:
+        sty = sty.set_properties(subset=tgl_cols, **{"text-align": "left"})
+    if right_cols:
+        sty = sty.set_properties(subset=right_cols, **{"text-align": "right"})
+
+    return sty
+
 def _concat_files(files) -> pd.DataFrame:
     if not files:
         return pd.DataFrame()
@@ -339,13 +369,11 @@ with st.sidebar:
             st.rerun()
 
 if go:
-    # ==== Ekspansi ZIP sebelum dibaca ====
     tiket_inputs  = _expand_zip(tiket_files)
     settle_inputs = _expand_zip(settle_files)
     rk_bca_inputs = _expand_zip(rk_bca_files)
     rk_non_inputs = _expand_zip(rk_non_files)
 
-    # ==== Baca file (hanya saat Proses) ====
     tiket_df   = _concat_files(tiket_inputs)
     settle_df  = _concat_files(settle_inputs)
     rk_bca_df  = _concat_files(rk_bca_inputs)
@@ -379,11 +407,11 @@ if go:
     s_date_legacy = _find_col(settle_df, ["Transaction Date","Tanggal Transaksi","Tanggal"])
     s_amt_legacy  = _find_col(settle_df, ["Settlement Amount","Amount","Nominal","Jumlah"])
     if s_amt_legacy is None and not settle_df.empty and len(settle_df.columns) >= 12:
-        s_amt_legacy = settle_df.columns[11]  # kolom L
+        s_amt_legacy = settle_df.columns[11]
     if s_date_legacy is None:
         s_date_legacy = _find_col(settle_df, ["Settlement Date","Tanggal Settlement","Settle Date","Tanggal","Setle Date"])
         if s_date_legacy is None and not settle_df.empty and len(settle_df.columns) >= 5:
-            s_date_legacy = settle_df.columns[4]  # kolom E
+            s_date_legacy = settle_df.columns[4]
 
     if s_date_legacy is None or s_amt_legacy is None:
         st.error("Kolom wajib Settlement Dana tidak ditemukan (tanggal/amount).")
@@ -534,12 +562,10 @@ if go:
     ]
     view_total = view_total.loc[:, ordered_cols]
 
-    # Format tampilan
     fmt = view_total.copy()
     for c in ordered_cols:
         if c in ("NO", "TANGGAL"):
             continue
-        # format hanya numeric
         if pd.api.types.is_numeric_dtype(fmt[c]):
             fmt[c] = fmt[c].map(_idr_fmt)
         else:
@@ -576,8 +602,8 @@ if go:
             ws.cell(row=1, column=col_idx, value=top)
             ws.cell(row=2, column=col_idx, value=sub)
 
-        ws.merge_cells(start_row=1, start_column=6, end_row=1, end_column=7)   # SETTLEMENT
-        ws.merge_cells(start_row=1, start_column=9, end_row=1, end_column=10)  # UANG MASUK
+        ws.merge_cells(start_row=1, start_column=6, end_row=1, end_column=7)
+        ws.merge_cells(start_row=1, start_column=9, end_row=1, end_column=10)
 
         max_col = ws.max_column
         for c in range(1, max_col + 1):
@@ -590,7 +616,7 @@ if go:
 
     # ======================================================================
     # ===========  TABEL: DETAIL TIKET (GO SHOW × SUB-KATEGORI)  ===========
-    #            (DIKEMBALIKAN SEPERTI SEMULA)
+    #            (SEMU ALA, TIDAK DIOTAK-ATIK)
     # ======================================================================
 
     def _col_by_letter_local(df: pd.DataFrame, letters: str) -> Optional[str]:
@@ -636,8 +662,6 @@ if go:
         tix = tix[~tix[date_col].isna()]
         tix = tix[(tix[date_col] >= month_start) & (tix[date_col] <= month_end)]
 
-        # >>> TIDAK MEMPERDULIKAN ST BAYAR (paid/unpaid sama-sama dihitung)
-
         main_norm_all = tix[type_main_col].apply(_norm_str)
         sub_norm_all  = tix[type_sub_col].apply(_norm_str)
         bank_norm_all = tix[bank_col].apply(_norm_str)
@@ -654,7 +678,6 @@ if go:
 
         idx2 = pd.Index(pd.date_range(month_start, month_end, freq="D").date, name="Tanggal")
 
-        # ================= GO SHOW (semula; TANPA drop_duplicates) =================
         gs = tix.copy()
         gs_sub  = m_prepaid_all
         gs_emo  = m_emoney_all
@@ -680,8 +703,7 @@ if go:
             "CASH - ASDP":       s_gs_cash_asdp.reindex(idx2, fill_value=0.0),
         }
 
-        # ================= ONLINE (semula; TANPA drop_duplicates) =================
-        on      = tix.copy()
+        on = tix.copy()
         on_sub  = sub_norm_all
         on_bank = bank_norm_all
 
@@ -716,8 +738,7 @@ if go:
 
         detail_mix["GT|GRAND TOTAL"] = detail_mix["GS|SUBTOTAL"] + detail_mix["ON|SUBTOTAL"]
 
-        # Render multi header
-        df2 = detail_mix.reset_index()  # kolom pertama = "Tanggal"
+        df2 = detail_mix.reset_index()
         df2.insert(0, "NO", range(1, len(df2) + 1))
 
         total_row2 = {"NO": "", "Tanggal": "TOTAL"}
@@ -729,7 +750,6 @@ if go:
         for c in df2_fmt.columns:
             if c in ("NO", "Tanggal"):
                 continue
-            # format hanya numeric
             if pd.api.types.is_numeric_dtype(df2_fmt[c]):
                 df2_fmt[c] = df2_fmt[c].map(_idr_fmt)
             else:
@@ -763,15 +783,17 @@ if go:
     detail_settle_excel_bytes = None
 
     s_order = _find_col(settle_df, ["Order ID","OrderId","Order Number","Order No","OrderID","order id"])
-    need = [("Settlement Date (E)", s_date_E), ("Settlement Amount (L)", s_amt_L),
-            ("Product Name (P)", s_prod_P), ("Order ID", s_order)]
-    miss = [n for n,c in need if c is None]
+    miss = [n for n,c in [
+        ("Settlement Date (E)", s_date_E),
+        ("Settlement Amount (L)", s_amt_L),
+        ("Product Name (P)", s_prod_P),
+        ("Order ID", s_order),
+    ] if c is None]
 
     if miss:
         st.warning("Kolom untuk 'DETAIL SETTLEMENT REPORT' belum lengkap: " + ", ".join(miss))
     else:
         sd = settle_df.copy()
-
         sd[s_date_E] = sd[s_date_E].apply(_to_date)
         sd = sd[~sd[s_date_E].isna()]
         sd = sd[(sd[s_date_E] >= month_start) & (sd[s_date_E] <= month_end)]
@@ -844,7 +866,7 @@ if go:
 
         detail_settle_table = df3_fmt_mi
 
-        # ------------------- Download Excel (Detail Settlement) -------------------
+        # Excel detail settlement
         from openpyxl.styles import Alignment, Font
         from openpyxl.utils import get_column_letter
 
@@ -917,7 +939,7 @@ if go:
         detail_settle_excel_bytes = bio_settle.getvalue()
 
     # =========================
-    # SIMPAN HASIL ke session_state (agar klik download tidak menghilangkan hasil)
+    # SIMPAN HASIL ke session_state
     # =========================
     periode = f"{y}-{m:02d}"
     st.session_state["HASIL"]["rekon"] = {
@@ -926,10 +948,7 @@ if go:
         "excel_bytes": bio.getvalue(),
     }
     if df2_fmt_mi is not None:
-        st.session_state["HASIL"]["detail_tiket"] = {
-            "periode": periode,
-            "table": df2_fmt_mi,
-        }
+        st.session_state["HASIL"]["detail_tiket"] = {"periode": periode, "table": df2_fmt_mi}
     else:
         st.session_state["HASIL"].pop("detail_tiket", None)
 
@@ -946,14 +965,14 @@ if go:
 
 
 # =========================
-# RENDER HASIL TERSIMPAN
+# RENDER HASIL TERSIMPAN (dengan angka rata kanan)
 # =========================
 hasil = st.session_state.get("HASIL", {})
 
 if "rekon" in hasil:
     st.subheader("Hasil Rekonsiliasi per Tanggal (mengikuti bulan parameter)")
     st.caption(f"Periode tersimpan: {hasil['rekon']['periode']}")
-    st.dataframe(hasil["rekon"]["table"], use_container_width=True, hide_index=True)
+    st.dataframe(_style_right(hasil["rekon"]["table"]), use_container_width=True, hide_index=True)
 
     st.download_button(
         "Unduh Excel Rekonsiliasi",
@@ -967,12 +986,12 @@ if "rekon" in hasil:
 if "detail_tiket" in hasil:
     st.subheader("Detail Tiket per Tanggal — TYPE: GO SHOW & ONLINE × SUB-TIPE (J) [SEMUA STATUS]")
     st.caption(f"Periode tersimpan: {hasil['detail_tiket']['periode']}")
-    st.dataframe(hasil["detail_tiket"]["table"], use_container_width=True, hide_index=True)
+    st.dataframe(_style_right(hasil["detail_tiket"]["table"]), use_container_width=True, hide_index=True)
 
 if "detail_settlement" in hasil:
     st.subheader("DETAIL SETTLEMENT REPORT")
     st.caption(f"Periode tersimpan: {hasil['detail_settlement']['periode']}")
-    st.dataframe(hasil["detail_settlement"]["table"], use_container_width=True, hide_index=True)
+    st.dataframe(_style_right(hasil["detail_settlement"]["table"]), use_container_width=True, hide_index=True)
 
     st.download_button(
         "Unduh Excel (Detail Settlement)",
