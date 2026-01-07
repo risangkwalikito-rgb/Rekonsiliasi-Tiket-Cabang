@@ -2,14 +2,8 @@
 # -*- coding: utf-8 -*-
 """
 Rekonsiliasi: Tiket Detail vs Settlement Dana
-FAST + FIX FORMAT + PERSIST HASIL (tidak hilang saat klik Download)
-
-Perbaikan utama:
-1) Streamlit rerun saat klik download → hasil tidak hilang karena disimpan di st.session_state["HASIL"]
-2) Error TypeError format rupiah → _idr_fmt tahan banting + format hanya kolom numeric
-3) Baca & concat file hanya saat tombol "Proses" ditekan + cache read berbasis (nama, bytes), termasuk ZIP
-4) Parsing tanggal & uang semi-vectorized (fallback apply hanya untuk sisa yang gagal)
-5) Detail Tiket & Detail Settlement pakai pivot_table (lebih cepat daripada banyak groupby)
+- PERSIST hasil (tidak hilang saat klik Download → tidak perlu proses ulang)
+- Pengambilan & perhitungan data TIKET DETAIL dikembalikan seperti semula (rumus/groupby semula)
 """
 
 from __future__ import annotations
@@ -26,12 +20,10 @@ import pandas as pd
 import streamlit as st
 from dateutil import parser as dtparser
 
-# =========================
-# Utilities
-# =========================
+
+# ---------- Utilities ----------
 
 def _parse_money(val) -> float:
-    """Fallback parser uang per-sel (dipakai hanya untuk kasus yang gagal di parser cepat)."""
     if val is None or (isinstance(val, float) and np.isnan(val)):
         return 0.0
     if isinstance(val, (int, float, np.number)):
@@ -48,8 +40,7 @@ def _parse_money(val) -> float:
     s = re.sub(r"[^0-9\.,\-]", "", s).strip()
     if s.startswith("-"):
         neg, s = True, s[1:].strip()
-    last_dot = s.rfind(".")
-    last_com = s.rfind(",")
+    last_dot = s.rfind("."); last_com = s.rfind(",")
     if last_dot == -1 and last_com == -1:
         num_s = s
     elif last_dot > last_com:
@@ -63,109 +54,8 @@ def _parse_money(val) -> float:
         num = float(num_s) if num_s else 0.0
     return -num if neg else num
 
-def _to_num_fast(sr: pd.Series) -> pd.Series:
-    """Parser uang cepat (vector-ish). Fallback apply hanya untuk sisa yang gagal."""
-    if sr is None:
-        return pd.Series(dtype=float)
-
-    if pd.api.types.is_numeric_dtype(sr):
-        return pd.to_numeric(sr, errors="coerce").fillna(0.0).astype(float)
-
-    s = sr.astype(str).str.strip()
-    s2 = s.replace({"": np.nan, "nan": np.nan, "None": np.nan})
-
-    neg = s.str.match(r"^\(.*\)$") | s.str.endswith("-") | s.str.startswith("-")
-
-    x = s2.fillna("")
-    x = x.str.replace(r"[()]", "", regex=True)
-    x = x.str.replace(r"(?i)\b(idr|rp|cr|dr)\b", "", regex=True)
-    x = x.str.replace("-", "", regex=False)
-    x = x.str.replace(r"[^0-9\.,]", "", regex=True)
-
-    last_dot = x.str.rfind(".")
-    last_com = x.str.rfind(",")
-
-    dot_major = last_dot > last_com
-    out = pd.Series(np.nan, index=sr.index, dtype=float)
-
-    if dot_major.any():
-        out.loc[dot_major] = pd.to_numeric(
-            x.loc[dot_major].str.replace(",", "", regex=False),
-            errors="coerce",
-        )
-    if (~dot_major).any():
-        out.loc[~dot_major] = pd.to_numeric(
-            x.loc[~dot_major].str.replace(".", "", regex=False).str.replace(",", ".", regex=False),
-            errors="coerce",
-        )
-
-    need_fallback = out.isna() & s2.notna()
-    if need_fallback.any():
-        out.loc[need_fallback] = s2.loc[need_fallback].apply(_parse_money)
-
-    out = out.fillna(0.0)
-    out.loc[neg] = -out.loc[neg].abs()
-    return out.astype(float)
-
-_ddmmyyyy = re.compile(r"\b(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{2,4})\b")
-
-def _to_date_series_fast(sr: pd.Series) -> pd.Series:
-    """Parser tanggal cepat: excel serial + pandas to_datetime + fallback dateutil untuk sisa."""
-    if sr is None:
-        return pd.Series(dtype="datetime64[ns]")
-
-    if pd.api.types.is_datetime64_any_dtype(sr):
-        return pd.to_datetime(sr, errors="coerce").dt.normalize()
-
-    s = sr.copy()
-
-    num = pd.to_numeric(s, errors="coerce")
-    out = pd.Series(pd.NaT, index=sr.index)
-
-    mask_serial = num.between(1, 100000)
-    if mask_serial.any():
-        out.loc[mask_serial] = (
-            pd.Timestamp("1899-12-30") + pd.to_timedelta(num[mask_serial], unit="D")
-        ).dt.normalize()
-
-    mask_rest = ~mask_serial
-    if mask_rest.any():
-        ss = s.loc[mask_rest].astype(str).str.strip()
-        parsed = pd.to_datetime(ss, errors="coerce", dayfirst=True)
-        remain = parsed.isna() & ss.ne("")
-        if remain.any():
-            parsed2 = pd.to_datetime(ss[remain], errors="coerce", dayfirst=False)
-            parsed.loc[remain] = parsed2
-        out.loc[mask_rest] = parsed.dt.normalize()
-
-    need_fallback = out.isna() & sr.notna()
-    if need_fallback.any():
-        def _fallback_one(v):
-            if pd.isna(v):
-                return pd.NaT
-            s0 = str(v).strip()
-            if not s0:
-                return pd.NaT
-            m0 = _ddmmyyyy.search(s0)
-            if m0:
-                d, M, y = m0.groups()
-                if len(y) == 2:
-                    y = "20" + y
-                try:
-                    return pd.Timestamp(year=int(y), month=int(M), day=int(d))
-                except Exception:
-                    pass
-            for dayfirst in (True, False):
-                try:
-                    d0 = dtparser.parse(s0, dayfirst=dayfirst, fuzzy=True)
-                    return pd.Timestamp(d0.date())
-                except Exception:
-                    continue
-            return pd.NaT
-
-        out.loc[need_fallback] = sr.loc[need_fallback].apply(_fallback_one)
-
-    return pd.to_datetime(out, errors="coerce").dt.normalize()
+def _to_num(sr: pd.Series) -> pd.Series:
+    return sr.apply(_parse_money).astype(float)
 
 def _norm_str(val) -> str:
     s = "" if val is None else str(val)
@@ -173,25 +63,111 @@ def _norm_str(val) -> str:
     s = "".join(ch for ch in s if not unicodedata.combining(ch))
     return s.strip().lower()
 
-def _norm_series_simple(sr: pd.Series) -> pd.Series:
-    return sr.astype(str).str.strip().str.casefold()
+_ddmmyyyy = re.compile(r"\b(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{2,4})\b")
 
-def _idr_fmt(val) -> str:
-    """Format angka ke IDR. Kalau val bukan angka (tanggal/teks), kembalikan string apa adanya."""
-    if val is None:
-        return "-"
-    if isinstance(val, float) and np.isnan(val):
-        return "-"
+def _to_date(val) -> Optional[pd.Timestamp]:
+    if pd.isna(val):
+        return None
+    if isinstance(val, (int, float, np.number)):
+        if not np.isfinite(val):
+            return None
+        if 1 <= float(val) <= 100000:
+            try:
+                base = pd.Timestamp("1899-12-30")
+                return (base + pd.to_timedelta(float(val), unit="D")).normalize()
+            except Exception:
+                pass
+    if isinstance(val, (pd.Timestamp, np.datetime64)):
+        try:
+            return pd.to_datetime(val).normalize()
+        except Exception:
+            return None
+    s = str(val).strip()
+    if not s:
+        return None
+    m = _ddmmyyyy.search(s)
+    if m:
+        d, M, y = m.groups()
+        if len(y) == 2:
+            y = "20" + y
+        try:
+            return pd.Timestamp(year=int(y), month=int(M), day=int(d))
+        except Exception:
+            pass
+    for dayfirst in (True, False):
+        try:
+            d = dtparser.parse(s, dayfirst=dayfirst, fuzzy=True)
+            return pd.Timestamp(d.date())
+        except Exception:
+            continue
+    return None
+
+def _read_any(uploaded_file) -> pd.DataFrame:
+    """Baca CSV/Excel. .xls → xlrd; fallback pyexcel-xls; terakhir coba openpyxl."""
+    if not uploaded_file:
+        return pd.DataFrame()
+    name = uploaded_file.name.lower()
+
     try:
-        n = float(val)
-    except Exception:
-        return str(val)
-    neg = n < 0
-    s = f"{abs(int(round(n))):,}".replace(",", ".")
-    return f"({s})" if neg else s
+        if name.endswith(".csv"):
+            for enc in ("utf-8-sig", "utf-8", "cp1252", "iso-8859-1"):
+                try:
+                    uploaded_file.seek(0)
+                    return pd.read_csv(
+                        uploaded_file,
+                        encoding=enc,
+                        sep=None,
+                        engine="python",
+                        dtype=str,
+                        na_filter=False,
+                    )
+                except Exception:
+                    continue
+            st.error(f"CSV gagal dibaca: {uploaded_file.name}. Simpan ulang sebagai UTF-8.")
+            return pd.DataFrame()
+
+        elif name.endswith((".xlsx", ".xlsm", ".xltx", ".xltm")):
+            uploaded_file.seek(0)
+            return pd.read_excel(uploaded_file, engine="openpyxl")
+
+        elif name.endswith(".xls"):
+            try:
+                uploaded_file.seek(0)
+                return pd.read_excel(uploaded_file, engine="xlrd")
+            except Exception:
+                pass
+            try:
+                uploaded_file.seek(0)
+                raw = uploaded_file.read()
+                from pyexcel_xls import get_data
+                book = get_data(io.BytesIO(raw))
+                for _sh, rows in book.items():
+                    if not rows:
+                        continue
+                    header = [str(x).strip() if x is not None else "" for x in rows[0]]
+                    body = rows[1:] if len(rows) > 1 else []
+                    return pd.DataFrame(body, columns=header)
+            except Exception:
+                pass
+            try:
+                uploaded_file.seek(0)
+                return pd.read_excel(uploaded_file, engine="openpyxl")
+            except Exception:
+                st.error("Gagal membaca file .xls. Pasang 'xlrd' atau 'pyexcel-xls', atau simpan ulang ke .xlsx.")
+                return pd.DataFrame()
+        else:
+            uploaded_file.seek(0)
+            return pd.read_excel(uploaded_file)
+
+    except ImportError:
+        st.error("Dukungan .xls perlu paket 'xlrd' atau 'pyexcel-xls'. Tambahkan di requirements.txt.")
+        return pd.DataFrame()
+    except Exception as e:
+        st.error(f"Gagal membaca {uploaded_file.name}: {e}")
+        return pd.DataFrame()
 
 def _find_col(df: pd.DataFrame, names: List[str]) -> Optional[str]:
-    if df is None or df.empty:
+    if df.empty:
         return None
     cols = [c for c in df.columns if isinstance(c, str)]
     m = {c.lower().strip().lstrip("\ufeff"): c for c in cols}
@@ -206,122 +182,65 @@ def _find_col(df: pd.DataFrame, names: List[str]) -> Optional[str]:
                 return c
     return None
 
-def _read_any(file_like) -> pd.DataFrame:
-    """Baca CSV/Excel. .xls → xlrd; fallback pyexcel-xls; terakhir coba openpyxl."""
-    if not file_like:
-        return pd.DataFrame()
-    name = getattr(file_like, "name", "unknown").lower()
-
+def _idr_fmt(val) -> str:
+    """Format angka ke IDR. Non-angka dibalikin string (biar tidak TypeError)."""
+    if val is None:
+        return "-"
+    if isinstance(val, float) and np.isnan(val):
+        return "-"
     try:
-        if name.endswith(".csv"):
-            for enc in ("utf-8-sig", "utf-8", "cp1252", "iso-8859-1"):
-                try:
-                    file_like.seek(0)
-                    return pd.read_csv(
-                        file_like,
-                        encoding=enc,
-                        sep=None,
-                        engine="python",
-                        dtype=str,
-                        na_filter=False,
-                    )
-                except Exception:
-                    continue
-            st.error(f"CSV gagal dibaca: {getattr(file_like,'name','(no name)')}. Simpan ulang sebagai UTF-8.")
-            return pd.DataFrame()
+        n = float(val)
+    except Exception:
+        return str(val)
+    neg = n < 0
+    s = f"{abs(int(round(n))):,}".replace(",", ".")
+    return f"({s})" if neg else s
 
-        elif name.endswith((".xlsx", ".xlsm", ".xltx", ".xltm")):
-            file_like.seek(0)
-            return pd.read_excel(file_like, engine="openpyxl")
-
-        elif name.endswith(".xls"):
-            try:
-                file_like.seek(0)
-                return pd.read_excel(file_like, engine="xlrd")
-            except Exception:
-                pass
-            try:
-                file_like.seek(0)
-                raw = file_like.read()
-                from pyexcel_xls import get_data
-                book = get_data(io.BytesIO(raw))
-                for _sh, rows in book.items():
-                    if not rows:
-                        continue
-                    header = [str(x).strip() if x is not None else "" for x in rows[0]]
-                    body = rows[1:] if len(rows) > 1 else []
-                    return pd.DataFrame(body, columns=header)
-            except Exception:
-                pass
-            try:
-                file_like.seek(0)
-                return pd.read_excel(file_like, engine="openpyxl")
-            except Exception:
-                st.error("Gagal membaca file .xls. Pasang 'xlrd' atau 'pyexcel-xls', atau simpan ulang ke .xlsx.")
-                return pd.DataFrame()
-        else:
-            file_like.seek(0)
-            return pd.read_excel(file_like)
-
-    except ImportError:
-        st.error("Dukungan .xls perlu paket 'xlrd' atau 'pyexcel-xls'. Tambahkan di requirements.txt.")
+def _concat_files(files) -> pd.DataFrame:
+    if not files:
         return pd.DataFrame()
-    except Exception as e:
-        st.error(f"Gagal membaca {getattr(file_like,'name','(no name)')}: {e}")
-        return pd.DataFrame()
+    frames = []
+    for f in files:
+        df = _read_any(f)
+        if not df.empty:
+            df.columns = [str(c).strip().lstrip("\ufeff") for c in df.columns]
+            df["__source__"] = getattr(f, "name", "file")
+            frames.append(df)
+    return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
 
-# =========================
-# ZIP expand + Caching
-# =========================
-
-@st.cache_data(show_spinner=False)
-def _read_any_bytes(name: str, data: bytes) -> pd.DataFrame:
-    bio = io.BytesIO(data)
-    bio.name = name
-    return _read_any(bio)
-
-def _expand_zip_to_pairs(files) -> List[Tuple[str, bytes]]:
-    """Return list of (name, bytes); if zip, expand allowed ext."""
-    out: List[Tuple[str, bytes]] = []
+def _expand_zip(files):
+    """Terima list UploadedFile, kembalikan list file-like:
+       - Jika item .zip → ekstrak file di dalamnya (hanya *.csv, *.xls, *.xlsx)
+       - Jika bukan .zip → tetap dikembalikan
+    """
+    if not files:
+        return []
+    out = []
     allow_ext = (".csv", ".xls", ".xlsx")
-
-    for f in (files or []):
-        try:
-            f.seek(0)
-            data = f.read()
-        except Exception:
-            data = f.getvalue()
-
-        fname = (getattr(f, "name", "") or "").lower()
+    for f in files:
+        fname = (f.name or "").lower()
         if fname.endswith(".zip"):
             try:
-                with zipfile.ZipFile(io.BytesIO(data)) as zf:
+                f.seek(0)
+                with zipfile.ZipFile(f) as zf:
                     for info in zf.infolist():
                         if info.is_dir():
                             continue
                         inner = info.filename
                         inner_lower = inner.lower()
-                        if inner_lower.startswith("__macosx/") or inner_lower.endswith(".ds_store"):
-                            continue
                         if not inner_lower.endswith(allow_ext):
                             continue
-                        out.append((f"{getattr(f,'name','zip')}::{inner}", zf.read(info)))
+                        if inner_lower.startswith("__macosx/") or inner_lower.endswith(".ds_store"):
+                            continue
+                        data = zf.read(info)
+                        bio = io.BytesIO(data)
+                        bio.name = f"{f.name}::{inner}"
+                        out.append(bio)
             except Exception as e:
-                st.warning(f"Gagal ekstrak ZIP {getattr(f,'name','(zip)')}: {e}")
+                st.warning(f"Gagal ekstrak ZIP {f.name}: {e}")
         else:
-            out.append((getattr(f, "name", "file"), data))
+            out.append(f)
     return out
-
-def _concat_files_cached(pairs: List[Tuple[str, bytes]]) -> pd.DataFrame:
-    frames = []
-    for name, data in (pairs or []):
-        df = _read_any_bytes(name, data)
-        if df is not None and not df.empty:
-            df = df.copy()
-            df.columns = [str(c).strip().lstrip("\ufeff") for c in df.columns]
-            df["__source__"] = name
-            frames.append(df)
-    return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
 
 def _promote_header(df: pd.DataFrame) -> pd.DataFrame:
     if df.empty:
@@ -338,7 +257,7 @@ def _promote_header(df: pd.DataFrame) -> pd.DataFrame:
     for r in (12, 13):
         if r < len(df) and _is_header_row(df.iloc[r]):
             cols = [str(x).strip() for x in df.iloc[r].tolist()]
-            out = df.iloc[r + 1 :].copy()
+            out = df.iloc[r+1:].copy()
             out.columns = cols
             out.columns = [str(c).strip().lstrip("\ufeff") for c in out.columns]
             return out
@@ -347,87 +266,69 @@ def _promote_header(df: pd.DataFrame) -> pd.DataFrame:
     for r in range(scan_max):
         if _is_header_row(df.iloc[r]):
             cols = [str(x).strip() for x in df.iloc[r].tolist()]
-            out = df.iloc[r + 1 :].copy()
+            out = df.iloc[r+1:].copy()
             out.columns = cols
             out.columns = [str(c).strip().lstrip("\ufeff") for c in out.columns]
             return out
 
     return df
 
-def _concat_rk_non_cached(pairs: List[Tuple[str, bytes]]) -> pd.DataFrame:
+def _concat_rk_non(files) -> pd.DataFrame:
+    if not files:
+        return pd.DataFrame()
     frames = []
-    for name, data in (pairs or []):
-        df = _read_any_bytes(name, data)
-        if df is None or df.empty:
+    for f in files:
+        df = _read_any(f)
+        if df.empty:
             continue
         df = _promote_header(df)
         if df.empty:
             continue
-        df = df.copy()
         df.columns = [str(c).strip().lstrip("\ufeff") for c in df.columns]
-        df["__source__"] = name
+        df["__source__"] = getattr(f, "name", "file")
         frames.append(df)
     return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
-
-# =========================
-# Month selector + helpers
-# =========================
 
 def _month_selector() -> Tuple[int, int]:
     from datetime import date
     today = date.today()
     years = list(range(today.year - 5, today.year + 2))
     months = [
-        ("01", "Januari"), ("02", "Februari"), ("03", "Maret"), ("04", "April"),
-        ("05", "Mei"), ("06", "Juni"), ("07", "Juli"), ("08", "Agustus"),
-        ("09", "September"), ("10", "Oktober"), ("11", "November"), ("12", "Desember")
+        ("01","Januari"), ("02","Februari"), ("03","Maret"), ("04","April"),
+        ("05","Mei"), ("06","Juni"), ("07","Juli"), ("08","Agustus"),
+        ("09","September"), ("10","Oktober"), ("11","November"), ("12","Desember")
     ]
     col1, col2 = st.columns(2)
     with col1:
         year = st.selectbox("Tahun", years, index=years.index(today.year))
     with col2:
-        month_label = st.selectbox("Bulan", months, index=int(today.strftime("%m")) - 1, format_func=lambda x: x[1])
+        month_label = st.selectbox("Bulan", months, index=int(today.strftime("%m"))-1, format_func=lambda x: x[1])
         month = int(month_label[0])
     return year, month
 
-def _force_multiindex_cols(df: pd.DataFrame) -> pd.DataFrame:
-    """Pastikan semua columns menjadi MultiIndex tuple (("", "NO"), ("", "Tanggal"), dst)."""
-    cols = []
-    for c in df.columns:
-        if isinstance(c, tuple):
-            cols.append(c)
-        else:
-            cols.append(("", str(c)))
-    df.columns = pd.MultiIndex.from_tuples(cols)
-    return df
 
-# =========================
-# Session state (persist hasil)
-# =========================
-
-if "HASIL" not in st.session_state:
-    st.session_state["HASIL"] = {}
-
-# =========================
-# App
-# =========================
+# ---------- App ----------
 
 st.set_page_config(page_title="Rekonsiliasi Tiket vs Settlement", layout="wide")
 st.title("Rekonsiliasi: Tiket Detail vs Settlement Dana")
 
+# Persist hasil agar tidak hilang saat klik download (Streamlit rerun)
+if "HASIL" not in st.session_state:
+    st.session_state["HASIL"] = {}
+
 with st.sidebar:
     st.header("1) Upload Sumber (multi-file)")
-    tiket_files = st.file_uploader("Tiket Detail (Excel .xls/.xlsx/.zip)", type=["xls", "xlsx", "zip"], accept_multiple_files=True)
-    settle_files = st.file_uploader("Settlement Dana (CSV/Excel/.zip)", type=["csv", "xls", "xlsx", "zip"], accept_multiple_files=True)
+    tiket_files = st.file_uploader("Tiket Detail (Excel .xls/.xlsx/.zip)", type=["xls","xlsx","zip"], accept_multiple_files=True)
+    settle_files = st.file_uploader("Settlement Dana (CSV/Excel/.zip)", type=["csv","xls","xlsx","zip"], accept_multiple_files=True)
     st.divider()
     st.header("Rekening Koran (opsional, multi-file)")
-    rk_bca_files = st.file_uploader("Rekening Koran BCA (CSV/Excel/.zip)", type=["csv", "xls", "xlsx", "zip"], accept_multiple_files=True)
-    rk_non_files = st.file_uploader("Rekening Koran Non BCA (CSV/Excel/.zip)", type=["csv", "xls", "xlsx", "zip"], accept_multiple_files=True)
+    rk_bca_files = st.file_uploader("Rekening Koran BCA (CSV/Excel/.zip)", type=["csv","xls","xlsx","zip"], accept_multiple_files=True)
+    rk_non_files = st.file_uploader("Rekening Koran Non BCA (CSV/Excel/.zip)", type=["csv","xls","xlsx","zip"], accept_multiple_files=True)
 
     st.header("2) Parameter Bulan & Tahun (WAJIB)")
     y, m = _month_selector()
     month_start = pd.Timestamp(y, m, 1)
-    month_end = pd.Timestamp(y, m, calendar.monthrange(y, m)[1])
+    month_end   = pd.Timestamp(y, m, calendar.monthrange(y, m)[1])
     st.caption(f"Periode dipakai: {month_start.date()} s/d {month_end.date()}")
 
     go = st.button("Proses", type="primary", use_container_width=True)
@@ -437,21 +338,18 @@ with st.sidebar:
             st.session_state["HASIL"] = {}
             st.rerun()
 
-# =========================
-# Compute ONLY when go
-# =========================
-
 if go:
-    # Read inputs (ONLY when go)
-    tiket_pairs = _expand_zip_to_pairs(tiket_files)
-    settle_pairs = _expand_zip_to_pairs(settle_files)
-    rk_bca_pairs = _expand_zip_to_pairs(rk_bca_files)
-    rk_non_pairs = _expand_zip_to_pairs(rk_non_files)
+    # ==== Ekspansi ZIP sebelum dibaca ====
+    tiket_inputs  = _expand_zip(tiket_files)
+    settle_inputs = _expand_zip(settle_files)
+    rk_bca_inputs = _expand_zip(rk_bca_files)
+    rk_non_inputs = _expand_zip(rk_non_files)
 
-    tiket_df = _concat_files_cached(tiket_pairs)
-    settle_df = _concat_files_cached(settle_pairs)
-    rk_bca_df = _concat_files_cached(rk_bca_pairs)
-    rk_non_df = _concat_rk_non_cached(rk_non_pairs)
+    # ==== Baca file (hanya saat Proses) ====
+    tiket_df   = _concat_files(tiket_inputs)
+    settle_df  = _concat_files(settle_inputs)
+    rk_bca_df  = _concat_files(rk_bca_inputs)
+    rk_non_df  = _concat_rk_non(rk_non_inputs)
 
     if tiket_df.empty:
         st.error("Tiket Detail kosong / belum diupload.")
@@ -461,180 +359,168 @@ if go:
         st.stop()
 
     # ---------------------- Tiket Detail (TABEL 1) ----------------------
-    t_date_action = _find_col(tiket_df, ["Action/Action Date", "Action Date", "Action", "Action date"])
-    t_amt_tarif = _find_col(tiket_df, ["Tarif", "tarif"])
-    t_stat = _find_col(tiket_df, ["St Bayar", "Status Bayar", "status", "status bayar"])
-    t_bank = _find_col(tiket_df, ["Bank", "Payment Channel", "channel", "payment method"])
-
+    t_date_action = _find_col(tiket_df, ["Action/Action Date","Action Date","Action","Action date"])
     if t_date_action is None:
         st.error("Kolom tanggal 'Action Date' tidak ditemukan pada Tiket Detail.")
         st.stop()
+
+    t_amt_tarif = _find_col(tiket_df, ["Tarif","tarif"])
     if t_amt_tarif is None:
         st.error("Kolom nominal 'Tarif' tidak ditemukan pada Tiket Detail.")
         st.stop()
+
+    t_stat = _find_col(tiket_df, ["St Bayar","Status Bayar","status","status bayar"])
+    t_bank = _find_col(tiket_df, ["Bank","Payment Channel","channel","payment method"])
     if t_stat is None or t_bank is None:
         st.error("Kolom 'St Bayar' atau 'Bank' tidak ditemukan pada Tiket Detail.")
         st.stop()
 
-    # ---------------------- Settlement (utama/legacy) ----------------------
-    s_date_legacy = _find_col(settle_df, ["Transaction Date", "Tanggal Transaksi", "Tanggal"])
-    s_amt_legacy = _find_col(settle_df, ["Settlement Amount", "Amount", "Nominal", "Jumlah"])
-    if s_amt_legacy is None and len(settle_df.columns) >= 12:
+    # ---------------------- Mapping Settlement (utama/legacy) ----------------------
+    s_date_legacy = _find_col(settle_df, ["Transaction Date","Tanggal Transaksi","Tanggal"])
+    s_amt_legacy  = _find_col(settle_df, ["Settlement Amount","Amount","Nominal","Jumlah"])
+    if s_amt_legacy is None and not settle_df.empty and len(settle_df.columns) >= 12:
         s_amt_legacy = settle_df.columns[11]  # kolom L
     if s_date_legacy is None:
-        s_date_legacy = _find_col(settle_df, ["Settlement Date", "Tanggal Settlement", "Settle Date", "Tanggal", "Setle Date"])
-        if s_date_legacy is None and len(settle_df.columns) >= 5:
+        s_date_legacy = _find_col(settle_df, ["Settlement Date","Tanggal Settlement","Settle Date","Tanggal","Setle Date"])
+        if s_date_legacy is None and not settle_df.empty and len(settle_df.columns) >= 5:
             s_date_legacy = settle_df.columns[4]  # kolom E
 
     if s_date_legacy is None or s_amt_legacy is None:
         st.error("Kolom wajib Settlement Dana tidak ditemukan (tanggal/amount).")
         st.stop()
 
-    # Untuk split BCA/Non-BCA dari E/L/P
-    s_date_E = _find_col(settle_df, ["Settlement Date", "Tanggal Settlement", "Settle Date", "Tanggal"]) or (
-        settle_df.columns[4] if len(settle_df.columns) >= 5 else None
-    )
-    s_amt_L = _find_col(settle_df, ["Settlement Amount", "Amount", "Nominal", "Jumlah"]) or (
-        settle_df.columns[11] if len(settle_df.columns) >= 12 else None
-    )
-    s_prod_P = _find_col(settle_df, ["Product Name", "Produk", "Nama Produk"]) or (
-        settle_df.columns[15] if len(settle_df.columns) >= 16 else None
-    )
+    # Untuk BCA/Non-BCA (pakai E/L/P)
+    s_date_E = _find_col(settle_df, ["Settlement Date","Tanggal Settlement","Settle Date","Tanggal"])
+    s_amt_L  = _find_col(settle_df, ["Settlement Amount","Amount","Nominal","Jumlah"])
+    if s_amt_L is None and not settle_df.empty and len(settle_df.columns) >= 12:
+        s_amt_L = settle_df.columns[11]
+    s_prod_P = _find_col(settle_df, ["Product Name","Produk","Nama Produk"])
+    if s_date_E is None and not settle_df.empty and len(settle_df.columns) >= 5:
+        s_date_E = settle_df.columns[4]
+    if s_prod_P is None and not settle_df.empty and len(settle_df.columns) >= 16:
+        s_prod_P = settle_df.columns[15]
 
-    # =========================
-    # TABEL 1: TIKET DETAIL ESPAY (Bank=ESPAY, St Bayar=paid)
-    # =========================
-    td = tiket_df[[t_date_action, t_amt_tarif, t_bank, t_stat]].copy()
-    td[t_date_action] = _to_date_series_fast(td[t_date_action])
-    td = td[td[t_date_action].notna()]
+    # ------------------  TABEL 1: TIKET DETAIL ESPAY (SEMU ALA) -------------------
+    td = tiket_df.copy()
+    td[t_date_action] = td[t_date_action].apply(_to_date)
+    td = td[~td[t_date_action].isna()]
 
-    bank_norm = _norm_series_simple(td[t_bank])
-    stat_norm = _norm_series_simple(td[t_stat])
-    td = td[(bank_norm == "espay") & (stat_norm == "paid")]
+    td_bank_norm = td[t_bank].apply(_norm_str)
+    td_stat_norm = td[t_stat].apply(_norm_str)
+
+    bank_mask = td_bank_norm.eq("espay")
+    paid_mask = td_stat_norm.eq("paid")
+    td = td[bank_mask & paid_mask]
 
     td = td[(td[t_date_action] >= month_start) & (td[t_date_action] <= month_end)]
-    td[t_amt_tarif] = _to_num_fast(td[t_amt_tarif])
+
+    td[t_amt_tarif] = _to_num(td[t_amt_tarif])
 
     td = td.drop_duplicates()
-    td["_DATE"] = td[t_date_action].dt.normalize()
-    tiket_by_date = td.groupby("_DATE", sort=False)[t_amt_tarif].sum()
 
-    # =========================
-    # Settlement (utama)
-    # =========================
-    sd_main = settle_df[[s_date_legacy, s_amt_legacy]].copy()
-    sd_main[s_date_legacy] = _to_date_series_fast(sd_main[s_date_legacy])
-    sd_main = sd_main[sd_main[s_date_legacy].notna()]
+    tiket_by_date = td.groupby(td[t_date_action].dt.date, dropna=True)[t_amt_tarif].sum()
+
+    # ------------------  Settlement Dana (utama/legacy) ------------------
+    sd_main = settle_df.copy()
+    sd_main[s_date_legacy] = sd_main[s_date_legacy].apply(_to_date)
+    sd_main = sd_main[~sd_main[s_date_legacy].isna()]
     sd_main = sd_main[(sd_main[s_date_legacy] >= month_start) & (sd_main[s_date_legacy] <= month_end)]
-    sd_main[s_amt_legacy] = _to_num_fast(sd_main[s_amt_legacy])
-    sd_main["_DATE"] = sd_main[s_date_legacy].dt.normalize()
-    settle_by_date_total = sd_main.groupby("_DATE", sort=False)[s_amt_legacy].sum()
+    sd_main[s_amt_legacy] = _to_num(sd_main[s_amt_legacy])
+    settle_by_date_total = sd_main.groupby(sd_main[s_date_legacy].dt.date, dropna=True)[s_amt_legacy].sum()
 
-    # =========================
-    # Settlement split BCA / Non-BCA (E/L/P)
-    # =========================
+    # --- Settlement BCA / Non BCA dari E/L/P (untuk split) ---
     bca_series = pd.Series(dtype=float)
     non_bca_series = pd.Series(dtype=float)
-    if s_date_E and s_amt_L and s_prod_P:
-        sd_split = settle_df[[s_date_E, s_amt_L, s_prod_P]].copy()
-        sd_split[s_date_E] = _to_date_series_fast(sd_split[s_date_E])
-        sd_split = sd_split[sd_split[s_date_E].notna()]
-        sd_split = sd_split[(sd_split[s_date_E] >= month_start) & (sd_split[s_date_E] <= month_end)]
-        sd_split[s_amt_L] = _to_num_fast(sd_split[s_amt_L])
+    if not settle_df.empty and s_date_E and s_amt_L and s_prod_P:
+        sd_bca = settle_df.copy()
+        sd_bca[s_date_E] = sd_bca[s_date_E].apply(_to_date)
+        sd_bca = sd_bca[~sd_bca[s_date_E].isna()]
+        sd_bca = sd_bca[(sd_bca[s_date_E] >= month_start) & (sd_bca[s_date_E] <= month_end)]
+        sd_bca[s_amt_L] = _to_num(sd_bca[s_amt_L])
+        prod_norm = sd_bca[s_prod_P].astype(str).str.strip().str.casefold()
+        bca_mask  = (prod_norm == "bca va online".casefold())
+        settle_by_date_bca     = sd_bca.loc[bca_mask].groupby(sd_bca[s_date_E].dt.date, dropna=True)[s_amt_L].sum()
+        settle_by_date_non_bca = sd_bca.loc[~bca_mask].groupby(sd_bca[s_date_E].dt.date, dropna=True)[s_amt_L].sum()
+        bca_series     = settle_by_date_bca
+        non_bca_series = settle_by_date_non_bca
 
-        prod_norm = sd_split[s_prod_P].astype(str).str.strip().str.casefold()
-        bca_mask = (prod_norm == "bca va online".casefold())
-
-        sd_split["_DATE"] = sd_split[s_date_E].dt.normalize()
-        bca_series = sd_split.loc[bca_mask].groupby("_DATE", sort=False)[s_amt_L].sum()
-        non_bca_series = sd_split.loc[~bca_mask].groupby("_DATE", sort=False)[s_amt_L].sum()
-
-    # =========================
-    # RK: Uang Masuk BCA (filter "mrc")
-    # =========================
+    # --- RK: Uang Masuk BCA ---
     uang_masuk_bca = pd.Series(dtype=float)
     if not rk_bca_df.empty:
-        rk_tgl_bca = _find_col(rk_bca_df, ["Tanggal", "Date", "Tgl", "Transaction Date"])
-        rk_amt_bca = _find_col(rk_bca_df, ["mutasi", "amount", "kredit", "credit", "cr"])
-        rk_ket_bca = _find_col(rk_bca_df, ["Keterangan", "Remark", "Deskripsi", "Description"])
+        rk_tgl_bca  = _find_col(rk_bca_df, ["Tanggal","Date","Tgl","Transaction Date"])
+        rk_amt_bca  = _find_col(rk_bca_df, ["mutasi","amount","kredit","credit","cr"])
+        rk_ket_bca  = _find_col(rk_bca_df, ["Keterangan","Remark","Deskripsi","Description"])
         if rk_tgl_bca and rk_amt_bca and rk_ket_bca:
-            bca = rk_bca_df[[rk_tgl_bca, rk_amt_bca, rk_ket_bca]].copy()
-            bca[rk_tgl_bca] = _to_date_series_fast(bca[rk_tgl_bca])
-            bca = bca[bca[rk_tgl_bca].notna()]
+            bca = rk_bca_df.copy()
+            bca[rk_tgl_bca] = bca[rk_tgl_bca].apply(_to_date)
+            bca = bca[~bca[rk_tgl_bca].isna()]
             bca = bca[(bca[rk_tgl_bca] >= month_start) & (bca[rk_tgl_bca] <= month_end)]
-            ket = bca[rk_ket_bca].astype(str).str.strip().str.casefold()
-            bca = bca[ket.str.contains("mrc", na=False)]
-            bca[rk_amt_bca] = _to_num_fast(bca[rk_amt_bca])
-            bca["_DATE"] = bca[rk_tgl_bca].dt.normalize()
-            uang_masuk_bca = bca.groupby("_DATE", sort=False)[rk_amt_bca].sum()
+            ket_norm = bca[rk_ket_bca].astype(str).str.strip().str.lower()
+            mrc_mask = ket_norm.str.contains("mrc", na=False)
+            bca = bca[mrc_mask]
+            bca[rk_amt_bca] = _to_num(bca[rk_amt_bca])
+            uang_masuk_bca = bca.groupby(bca[rk_tgl_bca].dt.date, dropna=True)[rk_amt_bca].sum()
 
-    # =========================
-    # RK: Uang Masuk Non-BCA (filter "mrc")
-    # =========================
+    # --- RK: Uang Masuk NON BCA ---
     uang_masuk_non = pd.Series(dtype=float)
     if not rk_non_df.empty:
-        rk_tgl_non = _find_col(rk_non_df, ["Date", "Tanggal", "Transaction Date", "Tgl"])
-        rk_amt_non = _find_col(rk_non_df, ["credit", "kredit", "cr", "amount"])
-        rk_rem_non = _find_col(rk_non_df, ["Remark", "Keterangan", "Description", "Deskripsi"])
+        rk_tgl_non  = _find_col(rk_non_df, ["Date","Tanggal","Transaction Date","Tgl"])
+        rk_amt_non  = _find_col(rk_non_df, ["credit","kredit","cr","amount"])
+        rk_rem_non  = _find_col(rk_non_df, ["Remark","Keterangan","Description","Deskripsi"])
         if rk_tgl_non and rk_amt_non and rk_rem_non:
-            nb = rk_non_df[[rk_tgl_non, rk_amt_non, rk_rem_non]].copy()
-            nb[rk_tgl_non] = _to_date_series_fast(nb[rk_tgl_non])
-            nb = nb[nb[rk_tgl_non].notna()]
+            nb = rk_non_df.copy()
+            nb[rk_tgl_non] = nb[rk_tgl_non].apply(_to_date)
+            nb = nb[~nb[rk_tgl_non].isna()]
             nb = nb[(nb[rk_tgl_non] >= month_start) & (nb[rk_tgl_non] <= month_end)]
-            rem = nb[rk_rem_non].astype(str).str.strip().str.casefold()
-            nb = nb[rem.str.contains("mrc", na=False)]
-            nb[rk_amt_non] = _to_num_fast(nb[rk_amt_non])
-            nb["_DATE"] = nb[rk_tgl_non].dt.normalize()
-            uang_masuk_non = nb.groupby("_DATE", sort=False)[rk_amt_non].sum()
+            rem_norm = nb[rk_rem_non].astype(str).str.strip().str.lower()
+            mrc_mask = rem_norm.str.contains("mrc", na=False)
+            nb = nb[mrc_mask]
+            nb[rk_amt_non] = _to_num(nb[rk_amt_non])
+            uang_masuk_non = nb.groupby(nb[rk_tgl_non].dt.date, dropna=True)[rk_amt_non].sum()
 
-    # =========================
-    # Index tanggal 1..akhir bulan (DatetimeIndex)
-    # =========================
-    idx = pd.date_range(month_start, month_end, freq="D")
-
-    tiket_series = tiket_by_date.reindex(idx, fill_value=0.0)
-    settle_series = settle_by_date_total.reindex(idx, fill_value=0.0)
-
-    bca_series = bca_series.reindex(idx, fill_value=0.0)
-    non_bca_series = non_bca_series.reindex(idx, fill_value=0.0)
-    total_settle_ser = (bca_series + non_bca_series).reindex(idx, fill_value=0.0)
-
-    uang_masuk_bca_ser = uang_masuk_bca.reindex(idx, fill_value=0.0)
-    uang_masuk_non_ser = uang_masuk_non.reindex(idx, fill_value=0.0)
+    # --- Index tanggal (1..akhir bulan) ---
+    idx = pd.Index(pd.date_range(month_start, month_end, freq="D").date, name="Tanggal")
+    tiket_series        = tiket_by_date.reindex(idx, fill_value=0.0)
+    settle_series       = settle_by_date_total.reindex(idx, fill_value=0.0)
+    bca_series          = bca_series.reindex(idx, fill_value=0.0)
+    non_bca_series      = non_bca_series.reindex(idx, fill_value=0.0)
+    total_settle_ser    = (bca_series + non_bca_series).reindex(idx, fill_value=0.0)
+    uang_masuk_bca_ser  = uang_masuk_bca.reindex(idx, fill_value=0.0)
+    uang_masuk_non_ser  = uang_masuk_non.reindex(idx, fill_value=0.0)
     total_uang_masuk_ser = (uang_masuk_bca_ser + uang_masuk_non_ser).reindex(idx, fill_value=0.0)
 
-    # =========================
-    # Final reconciliation table
-    # =========================
+    # --- Final table (angka) ---
     final = pd.DataFrame(index=idx)
-    final["TIKET DETAIL ESPAY"] = tiket_series.values
-    final["SETTLEMENT DANA ESPAY"] = settle_series.values
+    final["TIKET DETAIL ESPAY"]                 = tiket_series.values
+    final["SETTLEMENT DANA ESPAY"]             = settle_series.values
     final["SELISIH TIKET DETAIL - SETTLEMENT"] = final["TIKET DETAIL ESPAY"] - final["SETTLEMENT DANA ESPAY"]
-    final["SETTLEMENT BCA"] = bca_series.values
-    final["SETTLEMENT NON BCA"] = non_bca_series.values
-    final["TOTAL SETTLEMENT"] = total_settle_ser.values
-    final["UANG MASUK BCA"] = uang_masuk_bca_ser.values
-    final["UANG MASUK NON BCA"] = uang_masuk_non_ser.values
-    final["TOTAL UANG MASUK"] = total_uang_masuk_ser.values
-    final["SELISIH SETTLEMENT - UANG MASUK"] = final["TOTAL SETTLEMENT"] - final["TOTAL UANG MASUK"]
+    final["SETTLEMENT BCA"]                    = bca_series.values
+    final["SETTLEMENT NON BCA"]                = non_bca_series.values
+    final["TOTAL SETTLEMENT"]                  = total_settle_ser.values
+    final["UANG MASUK BCA"]                    = uang_masuk_bca_ser.values
+    final["UANG MASUK NON BCA"]                = uang_masuk_non_ser.values
+    final["TOTAL UANG MASUK"]                  = total_uang_masuk_ser.values
+    final["SELISIH SETTLEMENT - UANG MASUK"]   = final["TOTAL SETTLEMENT"] - final["TOTAL UANG MASUK"]
 
-    view = final.reset_index().rename(columns={"index": "TANGGAL"})
-    view["TANGGAL"] = pd.to_datetime(view["TANGGAL"]).dt.date
+    # -------- View + total (tabel utama) --------
+    view = final.reset_index()
+    idx_col_name = view.columns[0]
+    view = view.rename(columns={idx_col_name: "TANGGAL"})
     view.insert(0, "NO", range(1, len(view) + 1))
 
     total_row = pd.DataFrame([{
         "NO": "",
         "TANGGAL": "TOTAL",
-        "TIKET DETAIL ESPAY": float(final["TIKET DETAIL ESPAY"].sum()),
-        "SETTLEMENT DANA ESPAY": float(final["SETTLEMENT DANA ESPAY"].sum()),
-        "SELISIH TIKET DETAIL - SETTLEMENT": float(final["SELISIH TIKET DETAIL - SETTLEMENT"].sum()),
-        "SETTLEMENT BCA": float(final["SETTLEMENT BCA"].sum()),
-        "SETTLEMENT NON BCA": float(final["SETTLEMENT NON BCA"].sum()),
-        "TOTAL SETTLEMENT": float(final["TOTAL SETTLEMENT"].sum()),
-        "UANG MASUK BCA": float(final["UANG MASUK BCA"].sum()),
-        "UANG MASUK NON BCA": float(final["UANG MASUK NON BCA"].sum()),
-        "TOTAL UANG MASUK": float(final["TOTAL UANG MASUK"].sum()),
-        "SELISIH SETTLEMENT - UANG MASUK": float(final["SELISIH SETTLEMENT - UANG MASUK"].sum()),
+        "TIKET DETAIL ESPAY": final["TIKET DETAIL ESPAY"].sum(),
+        "SETTLEMENT DANA ESPAY": final["SETTLEMENT DANA ESPAY"].sum(),
+        "SELISIH TIKET DETAIL - SETTLEMENT": final["SELISIH TIKET DETAIL - SETTLEMENT"].sum(),
+        "SETTLEMENT BCA": final["SETTLEMENT BCA"].sum(),
+        "SETTLEMENT NON BCA": final["SETTLEMENT NON BCA"].sum(),
+        "TOTAL SETTLEMENT": final["TOTAL SETTLEMENT"].sum(),
+        "UANG MASUK BCA": final["UANG MASUK BCA"].sum(),
+        "UANG MASUK NON BCA": final["UANG MASUK NON BCA"].sum(),
+        "TOTAL UANG MASUK": final["TOTAL UANG MASUK"].sum(),
+        "SELISIH SETTLEMENT - UANG MASUK": final["SELISIH SETTLEMENT - UANG MASUK"].sum(),
     }])
 
     view_total = pd.concat([view, total_row], ignore_index=True)
@@ -648,16 +534,18 @@ if go:
     ]
     view_total = view_total.loc[:, ordered_cols]
 
+    # Format tampilan
     fmt = view_total.copy()
     for c in ordered_cols:
         if c in ("NO", "TANGGAL"):
             continue
+        # format hanya numeric
         if pd.api.types.is_numeric_dtype(fmt[c]):
             fmt[c] = fmt[c].map(_idr_fmt)
+        else:
+            fmt[c] = fmt[c].apply(_idr_fmt)
 
-    # =========================
-    # Export Rekonsiliasi
-    # =========================
+    # ---------- Export ke Excel + MERGE HEADER ----------
     from openpyxl.styles import Alignment, Font
 
     bio = io.BytesIO()
@@ -683,6 +571,7 @@ if go:
             "UANG MASUK", "UANG MASUK", "TOTAL UANG MASUK",
             "SELISIH SETTLEMENT - UANG MASUK",
         ]
+
         for col_idx, (top, sub) in enumerate(zip(top_headers, sub_headers), start=1):
             ws.cell(row=1, column=col_idx, value=top)
             ws.cell(row=2, column=col_idx, value=sub)
@@ -699,9 +588,11 @@ if go:
         ws.row_dimensions[1].height = 22
         ws.row_dimensions[2].height = 22
 
-    # =========================
-    # DETAIL TIKET (GO SHOW / ONLINE) - pivot
-    # =========================
+    # ======================================================================
+    # ===========  TABEL: DETAIL TIKET (GO SHOW × SUB-KATEGORI)  ===========
+    #            (DIKEMBALIKAN SEPERTI SEMULA)
+    # ======================================================================
+
     def _col_by_letter_local(df: pd.DataFrame, letters: str) -> Optional[str]:
         if df is None or df.empty:
             return None
@@ -716,255 +607,272 @@ if go:
         idx0 = n - 1
         return df.columns[idx0] if 0 <= idx0 < len(df.columns) else None
 
-    type_main_col = _find_col(tiket_df, ["Type", "Tipe", "Jenis"]) or _col_by_letter_local(tiket_df, "B")
-    bank_col = _find_col(tiket_df, ["Bank", "Payment Channel", "channel", "payment method"]) or _col_by_letter_local(tiket_df, "I")
-    type_sub_col = (
+    type_main_col = _find_col(tiket_df, ["Type","Tipe","Jenis"]) or _col_by_letter_local(tiket_df, "B")
+    bank_col      = _find_col(tiket_df, ["Bank","Payment Channel","channel","payment method"]) or _col_by_letter_local(tiket_df, "I")
+    type_sub_col  = (
         _find_col(tiket_df, [
-            "Payment Type", "Channel Type", "Transaction Type", "Sub Type",
-            "Tipe", "Tipe Pembayaran", "Jenis Pembayaran", "Kategori", "Metode", "Product Type"
+            "Payment Type","Channel Type","Transaction Type","Sub Type",
+            "Tipe","Tipe Pembayaran","Jenis Pembayaran","Kategori","Metode","Product Type"
         ]) or _col_by_letter_local(tiket_df, "J")
     )
-    date_col = _find_col(tiket_df, ["Action/Action Date", "Action Date", "Action", "Action date"]) or _col_by_letter_local(tiket_df, "AG")
-    tarif_col = _find_col(tiket_df, ["Tarif", "tarif"]) or _col_by_letter_local(tiket_df, "Y")
+    date_col      = _find_col(tiket_df, ["Action/Action Date","Action Date","Action","Action date"]) or _col_by_letter_local(tiket_df, "AG")
+    tarif_col     = _find_col(tiket_df, ["Tarif","tarif"]) or _col_by_letter_local(tiket_df, "Y")
 
-    df2_fmt = None
     required_missing = [n for n, c in [
         ("TYPE (kolom B)", type_main_col),
         ("BANK (kolom I)", bank_col),
-        ("SUB-TIPE (kolom J)", type_sub_col),
+        ("TIPE / SUB-TIPE (kolom J)", type_sub_col),
         ("ACTION DATE (kolom AG)", date_col),
         ("TARIF (kolom Y)", tarif_col),
     ] if c is None]
 
-    if not required_missing:
-        tix = tiket_df[[type_main_col, bank_col, type_sub_col, date_col, tarif_col]].copy()
-        tix[date_col] = _to_date_series_fast(tix[date_col])
-        tix = tix[tix[date_col].notna()]
+    df2_fmt_mi = None
+    if required_missing:
+        st.warning("Kolom wajib untuk tabel 'Detail Tiket (GO SHOW/ONLINE)' belum lengkap: " + ", ".join(required_missing))
+    else:
+        tix = tiket_df.copy()
+
+        tix[date_col] = tix[date_col].apply(_to_date)
+        tix = tix[~tix[date_col].isna()]
         tix = tix[(tix[date_col] >= month_start) & (tix[date_col] <= month_end)]
-        tix[tarif_col] = _to_num_fast(tix[tarif_col])
 
-        main_norm = tix[type_main_col].astype(str).str.strip().str.casefold()
-        sub_norm = tix[type_sub_col].astype(str).str.strip().str.casefold()
-        bank_norm = tix[bank_col].astype(str).str.strip().str.casefold()
+        # >>> TIDAK MEMPERDULIKAN ST BAYAR (paid/unpaid sama-sama dihitung)
 
-        m_go_show = (main_norm == "go show") | main_norm.str.contains(r"\bgo\s*show\b", na=False)
-        m_online = (main_norm == "online") | main_norm.str.contains(r"\bonline\b", na=False)
+        main_norm_all = tix[type_main_col].apply(_norm_str)
+        sub_norm_all  = tix[type_sub_col].apply(_norm_str)
+        bank_norm_all = tix[bank_col].apply(_norm_str)
 
-        m_prepaid = (sub_norm == "prepaid") | sub_norm.str.contains(r"\bprepaid\b", na=False)
-        m_emoney = (sub_norm == "e-money") | sub_norm.str.contains(r"\be[-\s]*money\b|\bemoney\b", na=False)
-        m_varetail = sub_norm.str.contains(r"virtual\s*account", na=False) & sub_norm.str.contains(r"gerai|retail", na=False)
-        m_cash = (sub_norm == "cash") | sub_norm.str.contains(r"\bcash\b", na=False)
+        tix[tarif_col] = _to_num(tix[tarif_col])
 
-        label = pd.Series("", index=tix.index)
+        m_go_show = (main_norm_all == "go show") | main_norm_all.str.contains(r"\bgo\s*show\b", na=False)
+        m_online  = (main_norm_all == "online")  | main_norm_all.str.contains(r"\bonline\b",    na=False)
 
-        # GO SHOW
-        label.loc[m_go_show & m_prepaid & (bank_norm == "bca")] = "PREPAID - BCA"
-        label.loc[m_go_show & m_prepaid & (bank_norm == "bri")] = "PREPAID - BRI"
-        label.loc[m_go_show & m_prepaid & (bank_norm == "bni")] = "PREPAID - BNI"
-        label.loc[m_go_show & m_prepaid & (bank_norm == "mandiri")] = "PREPAID - MANDIRI"
-        label.loc[m_go_show & m_emoney & (bank_norm == "espay")] = "E-MONEY - ESPAY"
-        label.loc[m_go_show & m_varetail & (bank_norm == "espay")] = "VIRTUAL ACCOUNT DAN GERAI RETAIL - ESPAY"
-        label.loc[m_go_show & m_cash & (bank_norm == "asdp")] = "CASH - ASDP"
+        m_prepaid_all  = (sub_norm_all == "prepaid") | sub_norm_all.str.contains(r"\bprepaid\b", na=False)
+        m_emoney_all   = (sub_norm_all == "e-money") | sub_norm_all.str.contains(r"\be[-\s]*money\b|\bemoney\b", na=False)
+        m_varetail_all = sub_norm_all.str.contains(r"virtual\s*account", na=False) & sub_norm_all.str.contains(r"gerai|retail", na=False)
+        m_cash_all     = (sub_norm_all == "cash") | sub_norm_all.str.contains(r"\bcash\b", na=False)
 
-        # ONLINE
-        label.loc[m_online & m_emoney & (bank_norm == "espay")] = "E-MONEY - ESPAY"
-        label.loc[m_online & m_varetail & (bank_norm == "espay")] = "VIRTUAL ACCOUNT & GERAI RETAIL - ESPAY"
-        label.loc[m_online & m_cash & (bank_norm == "asdp")] = "CASH - ASDP"
+        idx2 = pd.Index(pd.date_range(month_start, month_end, freq="D").date, name="Tanggal")
 
-        main_grp = pd.Series(np.where(m_go_show, "GO SHOW", np.where(m_online, "ONLINE", "")), index=tix.index)
-        keep = (main_grp != "") & (label != "")
-        tix2 = tix.loc[keep].copy()
-        tix2["_MAIN"] = main_grp.loc[keep].values
-        tix2["_LABEL"] = label.loc[keep].values
-        tix2["_DATE"] = tix2[date_col].dt.normalize()
+        # ================= GO SHOW (semula; TANPA drop_duplicates) =================
+        gs = tix.copy()
+        gs_sub  = m_prepaid_all
+        gs_emo  = m_emoney_all
+        gs_var  = m_varetail_all
+        gs_cash = m_cash_all
+        gs_bank = bank_norm_all
 
-        idx2 = pd.date_range(month_start, month_end, freq="D")
-        pt = tix2.pivot_table(
-            index="_DATE",
-            columns=["_MAIN", "_LABEL"],
-            values=tarif_col,
-            aggfunc="sum",
-            fill_value=0.0,
-        ).reindex(idx2, fill_value=0.0)
+        s_gs_prepaid_bca     = gs.loc[m_go_show & gs_sub  & (gs_bank == "bca")    ].groupby(gs[date_col].dt.date, dropna=True)[tarif_col].sum()
+        s_gs_prepaid_bri     = gs.loc[m_go_show & gs_sub  & (gs_bank == "bri")    ].groupby(gs[date_col].dt.date, dropna=True)[tarif_col].sum()
+        s_gs_prepaid_bni     = gs.loc[m_go_show & gs_sub  & (gs_bank == "bni")    ].groupby(gs[date_col].dt.date, dropna=True)[tarif_col].sum()
+        s_gs_prepaid_mandiri = gs.loc[m_go_show & gs_sub  & (gs_bank == "mandiri")].groupby(gs[date_col].dt.date, dropna=True)[tarif_col].sum()
+        s_gs_emoney_espay    = gs.loc[m_go_show & gs_emo  & (gs_bank == "espay")  ].groupby(gs[date_col].dt.date, dropna=True)[tarif_col].sum()
+        s_gs_varetail_espay  = gs.loc[m_go_show & gs_var  & (gs_bank == "espay")  ].groupby(gs[date_col].dt.date, dropna=True)[tarif_col].sum()
+        s_gs_cash_asdp       = gs.loc[m_go_show & gs_cash & (gs_bank == "asdp")   ].groupby(gs[date_col].dt.date, dropna=True)[tarif_col].sum()
 
-        gs_order = [
-            "PREPAID - BCA", "PREPAID - BRI", "PREPAID - BNI", "PREPAID - MANDIRI",
-            "E-MONEY - ESPAY", "VIRTUAL ACCOUNT DAN GERAI RETAIL - ESPAY", "CASH - ASDP",
-        ]
-        on_order = [
-            "E-MONEY - ESPAY", "VIRTUAL ACCOUNT & GERAI RETAIL - ESPAY", "CASH - ASDP",
-        ]
+        go_show_cols = {
+            "PREPAID - BCA":     s_gs_prepaid_bca.reindex(idx2, fill_value=0.0),
+            "PREPAID - BRI":     s_gs_prepaid_bri.reindex(idx2, fill_value=0.0),
+            "PREPAID - BNI":     s_gs_prepaid_bni.reindex(idx2, fill_value=0.0),
+            "PREPAID - MANDIRI": s_gs_prepaid_mandiri.reindex(idx2, fill_value=0.0),
+            "E-MONEY - ESPAY":   s_gs_emoney_espay.reindex(idx2, fill_value=0.0),
+            "VIRTUAL ACCOUNT DAN GERAI RETAIL - ESPAY": s_gs_varetail_espay.reindex(idx2, fill_value=0.0),
+            "CASH - ASDP":       s_gs_cash_asdp.reindex(idx2, fill_value=0.0),
+        }
 
-        for lab in gs_order:
-            if ("GO SHOW", lab) not in pt.columns:
-                pt[("GO SHOW", lab)] = 0.0
-        for lab in on_order:
-            if ("ONLINE", lab) not in pt.columns:
-                pt[("ONLINE", lab)] = 0.0
+        # ================= ONLINE (semula; TANPA drop_duplicates) =================
+        on      = tix.copy()
+        on_sub  = sub_norm_all
+        on_bank = bank_norm_all
 
-        gs = pt["GO SHOW"][gs_order].copy()
-        on = pt["ONLINE"][on_order].copy()
+        m_emoney_on     = ((on_sub == "e-money") | on_sub.str.contains(r"\be[-\s]*money\b|\bemoney\b", na=False))
+        m_varetail_on   = on_sub.str.contains(r"virtual\s*account", na=False) & on_sub.str.contains(r"gerai|retail", na=False)
+        m_cash_on       = (on_sub == "cash") | on_sub.str.contains(r"\bcash\b", na=False)
+        m_bank_espay_on = (on_bank == "espay")
 
-        gs_subtotal = gs.sum(axis=1)
-        on_subtotal = on.sum(axis=1)
-        grand_total = gs_subtotal + on_subtotal
+        s_on_emoney_espay   = on.loc[m_online & m_bank_espay_on & m_emoney_on] .groupby(on[date_col].dt.date, dropna=True)[tarif_col].sum()
+        s_on_varetail_espay = on.loc[m_online & m_bank_espay_on & m_varetail_on].groupby(on[date_col].dt.date, dropna=True)[tarif_col].sum()
+        s_on_cash_asdp      = on.loc[m_online & m_cash_on       & (on_bank == "asdp")]  .groupby(on[date_col].dt.date, dropna=True)[tarif_col].sum()
 
-        df2 = pd.DataFrame(index=idx2)
-        for c in gs_order:
-            df2[("GO SHOW", c)] = gs[c].values
-        df2[("GO SHOW", "SUBTOTAL")] = gs_subtotal.values
-        for c in on_order:
-            df2[("ONLINE", c)] = on[c].values
-        df2[("ONLINE", "SUBTOTAL")] = on_subtotal.values
-        df2[("GRAND TOTAL", "GRAND TOTAL")] = grand_total.values
+        online_cols = {
+            "E-MONEY - ESPAY":                        s_on_emoney_espay.reindex(idx2, fill_value=0.0),
+            "VIRTUAL ACCOUNT & GERAI RETAIL - ESPAY": s_on_varetail_espay.reindex(idx2, fill_value=0.0),
+            "CASH - ASDP":                            s_on_cash_asdp.reindex(idx2, fill_value=0.0),
+        }
 
-        df2_view = df2.reset_index().rename(columns={"index": "Tanggal"})
-        df2_view["Tanggal"] = pd.to_datetime(df2_view["Tanggal"]).dt.date
-        df2_view.insert(0, "NO", range(1, len(df2_view) + 1))
-        df2_view = _force_multiindex_cols(df2_view)
+        detail_mix = pd.DataFrame(index=idx2)
 
-        total_row2 = {("", "NO"): "", ("", "Tanggal"): "TOTAL"}
-        for col in df2.columns:
-            total_row2[col] = float(df2[col].sum())
-        df2_view = pd.concat([df2_view, pd.DataFrame([total_row2])], ignore_index=True)
+        for k, ser in go_show_cols.items():
+            detail_mix[f"GS|{k}"] = ser.values
+        gs_df = pd.DataFrame(go_show_cols, index=idx2)
+        gs_subtotal = gs_df.sum(axis=1) if not gs_df.empty else pd.Series(0.0, index=idx2)
+        detail_mix["GS|SUBTOTAL"] = gs_subtotal.values
 
-        df2_fmt = df2_view.copy()
-        for col in df2_fmt.columns:
-            if col in [("", "NO"), ("", "Tanggal")]:
+        for k, ser in online_cols.items():
+            detail_mix[f"ON|{k}"] = ser.values
+        on_df = pd.DataFrame(online_cols, index=idx2)
+        on_subtotal = on_df.sum(axis=1) if not on_df.empty else pd.Series(0.0, index=idx2)
+        detail_mix["ON|SUBTOTAL"] = on_subtotal.values
+
+        detail_mix["GT|GRAND TOTAL"] = detail_mix["GS|SUBTOTAL"] + detail_mix["ON|SUBTOTAL"]
+
+        # Render multi header
+        df2 = detail_mix.reset_index()  # kolom pertama = "Tanggal"
+        df2.insert(0, "NO", range(1, len(df2) + 1))
+
+        total_row2 = {"NO": "", "Tanggal": "TOTAL"}
+        for k in detail_mix.columns:
+            total_row2[k] = float(detail_mix[k].sum())
+        df2 = pd.concat([df2, pd.DataFrame([total_row2])], ignore_index=True)
+
+        df2_fmt = df2.copy()
+        for c in df2_fmt.columns:
+            if c in ("NO", "Tanggal"):
                 continue
-            if pd.api.types.is_numeric_dtype(df2_fmt[col]):
-                df2_fmt[col] = df2_fmt[col].map(_idr_fmt)
+            # format hanya numeric
+            if pd.api.types.is_numeric_dtype(df2_fmt[c]):
+                df2_fmt[c] = df2_fmt[c].map(_idr_fmt)
+            else:
+                df2_fmt[c] = df2_fmt[c].apply(_idr_fmt)
 
-    # =========================
-    # DETAIL SETTLEMENT REPORT - pivot + export excel
-    # =========================
-    df3_fmt = None
-    detail_settle_bytes = None
+        def _strip_prefix(col_name: str) -> tuple[str, str]:
+            if col_name.startswith("GS|"):
+                return ("GO SHOW", col_name[3:])
+            if col_name.startswith("ON|"):
+                return ("ONLINE", col_name[3:])
+            if col_name.startswith("GT|"):
+                return ("GRAND TOTAL", "")
+            return ("", col_name)
 
-    s_order = _find_col(settle_df, ["Order ID", "OrderId", "Order Number", "Order No", "OrderID", "order id"])
-    if s_date_E and s_amt_L and s_prod_P and s_order:
-        sd = settle_df[[s_date_E, s_amt_L, s_prod_P, s_order]].copy()
-        sd[s_date_E] = _to_date_series_fast(sd[s_date_E])
-        sd = sd[sd[s_date_E].notna()]
+        ordered_keys = [k for k in detail_mix.columns if k.startswith("GS|") and k != "GS|SUBTOTAL"] \
+                     + ["GS|SUBTOTAL"] \
+                     + [k for k in detail_mix.columns if k.startswith("ON|") and k != "ON|SUBTOTAL"] \
+                     + ["ON|SUBTOTAL"] \
+                     + ["GT|GRAND TOTAL"]
+
+        df2_fmt = df2_fmt[["NO", "Tanggal"] + ordered_keys]
+        top = [("", "NO"), ("", "Tanggal")] + [_strip_prefix(k) for k in ordered_keys]
+        df2_fmt_mi = df2_fmt.copy()
+        df2_fmt_mi.columns = pd.MultiIndex.from_tuples(top)
+
+    # ======================================================================
+    # ===================  TABEL: DETAIL SETTLEMENT REPORT  =================
+    # ======================================================================
+
+    detail_settle_table = None
+    detail_settle_excel_bytes = None
+
+    s_order = _find_col(settle_df, ["Order ID","OrderId","Order Number","Order No","OrderID","order id"])
+    need = [("Settlement Date (E)", s_date_E), ("Settlement Amount (L)", s_amt_L),
+            ("Product Name (P)", s_prod_P), ("Order ID", s_order)]
+    miss = [n for n,c in need if c is None]
+
+    if miss:
+        st.warning("Kolom untuk 'DETAIL SETTLEMENT REPORT' belum lengkap: " + ", ".join(miss))
+    else:
+        sd = settle_df.copy()
+
+        sd[s_date_E] = sd[s_date_E].apply(_to_date)
+        sd = sd[~sd[s_date_E].isna()]
         sd = sd[(sd[s_date_E] >= month_start) & (sd[s_date_E] <= month_end)]
-        sd[s_amt_L] = _to_num_fast(sd[s_amt_L])
 
-        prod_norm = sd[s_prod_P].astype(str).str.strip().str.casefold()
-        order_norm = sd[s_order].astype(str).str.strip().str.casefold()
+        sd[s_amt_L] = _to_num(sd[s_amt_L])
+        prod_norm   = sd[s_prod_P].astype(str).str.strip().str.casefold()
+        order_norm  = sd[s_order].astype(str).str.strip().str.casefold()
 
         go_show_mask = order_norm.str.endswith("_ord") | (~order_norm.str.startswith("ord") & order_norm.str.endswith("ord"))
-        online_mask = order_norm.str.startswith("ord")
+        online_mask  = order_norm.str.startswith("ord")
 
-        main = np.where(go_show_mask, "GO SHOW", np.where(online_mask, "ONLINE", ""))
-        has_va = prod_norm.str.contains("va", na=False)
-        is_bca_va = (prod_norm == "bca va online".casefold())
-        label = np.where(
-            has_va & is_bca_va, "VIRTUAL ACCOUNT - BCA",
-            np.where(has_va & ~is_bca_va, "VIRTUAL ACCOUNT - NON BCA", "E-MONEY")
-        )
+        has_va      = prod_norm.str.contains("va", na=False)
+        is_bca_va   = (prod_norm == "bca va online")
+        non_bca_va  = has_va & ~is_bca_va
+        is_emoney   = ~has_va
 
-        keep = (main != "")
-        sd2 = sd.loc[keep].copy()
-        sd2["_MAIN"] = main[keep]
-        sd2["_LABEL"] = label[keep]
-        sd2["_DATE"] = sd2[s_date_E].dt.normalize()
+        gs_va_bca     = sd.loc[go_show_mask & is_bca_va] .groupby(sd[s_date_E].dt.date, dropna=True)[s_amt_L].sum()
+        gs_va_nonbca  = sd.loc[go_show_mask & non_bca_va].groupby(sd[s_date_E].dt.date, dropna=True)[s_amt_L].sum()
+        gs_emoney     = sd.loc[go_show_mask & is_emoney] .groupby(sd[s_date_E].dt.date, dropna=True)[s_amt_L].sum()
 
-        idx_set = pd.date_range(month_start, month_end, freq="D")
-        pt2 = sd2.pivot_table(
-            index="_DATE",
-            columns=["_MAIN", "_LABEL"],
-            values=s_amt_L,
-            aggfunc="sum",
-            fill_value=0.0,
-        ).reindex(idx_set, fill_value=0.0)
+        on_va_bca     = sd.loc[online_mask & is_bca_va]  .groupby(sd[s_date_E].dt.date, dropna=True)[s_amt_L].sum()
+        on_va_nonbca  = sd.loc[online_mask & non_bca_va] .groupby(sd[s_date_E].dt.date, dropna=True)[s_amt_L].sum()
+        on_emoney     = sd.loc[online_mask & is_emoney]  .groupby(sd[s_date_E].dt.date, dropna=True)[s_amt_L].sum()
 
-        det_order = ["VIRTUAL ACCOUNT - BCA", "VIRTUAL ACCOUNT - NON BCA", "E-MONEY"]
-        for mname in ["GO SHOW", "ONLINE"]:
-            for lab in det_order:
-                if (mname, lab) not in pt2.columns:
-                    pt2[(mname, lab)] = 0.0
+        idx_set = pd.Index(pd.date_range(month_start, month_end, freq="D").date, name="Tanggal")
+        cols_det = {
+            "GS|VIRTUAL ACCOUNT - BCA":          gs_va_bca.reindex(idx_set, fill_value=0.0),
+            "GS|VIRTUAL ACCOUNT - NON BCA":      gs_va_nonbca.reindex(idx_set, fill_value=0.0),
+            "GS|E-MONEY":                        gs_emoney.reindex(idx_set, fill_value=0.0),
+            "ON|VIRTUAL ACCOUNT - BCA":          on_va_bca.reindex(idx_set, fill_value=0.0),
+            "ON|VIRTUAL ACCOUNT - NON BCA":      on_va_nonbca.reindex(idx_set, fill_value=0.0),
+            "ON|E-MONEY":                        on_emoney.reindex(idx_set, fill_value=0.0),
+        }
 
-        df3 = pd.DataFrame(index=idx_set)
-        for lab in det_order:
-            df3[("GO SHOW", lab)] = pt2["GO SHOW"][lab].values
-        for lab in det_order:
-            df3[("ONLINE", lab)] = pt2["ONLINE"][lab].values
+        detail_settle = pd.DataFrame(index=idx_set)
+        for k, ser in cols_det.items():
+            detail_settle[k] = ser.values
 
-        df3_view = df3.reset_index().rename(columns={"index": "Tanggal"})
-        df3_view["Tanggal"] = pd.to_datetime(df3_view["Tanggal"]).dt.date
-        df3_view.insert(0, "NO", range(1, len(df3_view) + 1))
-        df3_view = _force_multiindex_cols(df3_view)
+        df3 = detail_settle.reset_index()
+        df3.insert(0, "NO", range(1, len(df3) + 1))
 
-        total_row3 = {("", "NO"): "", ("", "Tanggal"): "TOTAL"}
-        for col in df3.columns:
-            total_row3[col] = float(df3[col].sum())
-        df3_view = pd.concat([df3_view, pd.DataFrame([total_row3])], ignore_index=True)
+        total_row3 = {"NO": "", "Tanggal": "TOTAL"}
+        for k in detail_settle.columns:
+            total_row3[k] = float(detail_settle[k].sum())
+        df3 = pd.concat([df3, pd.DataFrame([total_row3])], ignore_index=True)
 
-        df3_fmt = df3_view.copy()
-        for col in df3_fmt.columns:
-            if col in [("", "NO"), ("", "Tanggal")]:
+        df3_fmt = df3.copy()
+        for c in df3_fmt.columns:
+            if c in ("NO", "Tanggal"):
                 continue
-            if pd.api.types.is_numeric_dtype(df3_fmt[col]):
-                df3_fmt[col] = df3_fmt[col].map(_idr_fmt)
+            if pd.api.types.is_numeric_dtype(df3_fmt[c]):
+                df3_fmt[c] = df3_fmt[c].map(_idr_fmt)
+            else:
+                df3_fmt[c] = df3_fmt[c].apply(_idr_fmt)
 
-        # ===== Export excel detail settlement (seperti versi sebelumnya) =====
+        def _split_head(col_name: str) -> tuple[str, str]:
+            if col_name.startswith("GS|"):
+                return ("GO SHOW", col_name[3:])
+            if col_name.startswith("ON|"):
+                return ("ONLINE", col_name[3:])
+            return ("", col_name)
+
+        ordered = [k for k in detail_settle.columns if k.startswith("GS|")] + \
+                  [k for k in detail_settle.columns if k.startswith("ON|")]
+
+        df3_fmt = df3_fmt[["NO", "Tanggal"] + ordered]
+        top3 = [("", "NO"), ("", "Tanggal")] + [_split_head(k) for k in ordered]
+        df3_fmt_mi = df3_fmt.copy()
+        df3_fmt_mi.columns = pd.MultiIndex.from_tuples(top3)
+
+        detail_settle_table = df3_fmt_mi
+
+        # ------------------- Download Excel (Detail Settlement) -------------------
         from openpyxl.styles import Alignment, Font
         from openpyxl.utils import get_column_letter
 
-        raw_flat = df3.reset_index().rename(columns={"index": "Tanggal"})
-        raw_flat["Tanggal"] = pd.to_datetime(raw_flat["Tanggal"]).dt.date
-
-        flat_map = {}
-        for col in df3.columns:
-            main_name, lab = col
-            prefix = "GS|" if main_name == "GO SHOW" else "ON|"
-            flat_map[col] = prefix + lab
-
-        df3_excel = pd.DataFrame({"Tanggal": raw_flat["Tanggal"]})
-        for col in df3.columns:
-            df3_excel[flat_map[col]] = df3[col].values
-        df3_excel.insert(0, "NO", range(1, len(df3_excel) + 1))
-
-        total_row_excel = {"NO": "", "Tanggal": "TOTAL"}
-        for c in df3_excel.columns:
-            if c in ("NO", "Tanggal"):
-                continue
-            total_row_excel[c] = float(df3_excel[c].sum())
-        df3_excel = pd.concat([df3_excel, pd.DataFrame([total_row_excel])], ignore_index=True)
-
-        df3_excel_fmt = df3_excel.copy()
-        for c in df3_excel_fmt.columns:
-            if c in ("NO", "Tanggal"):
-                continue
-            if pd.api.types.is_numeric_dtype(df3_excel_fmt[c]):
-                df3_excel_fmt[c] = df3_excel_fmt[c].map(_idr_fmt)
-
         bio_settle = io.BytesIO()
         with pd.ExcelWriter(bio_settle, engine="openpyxl") as xw3:
-            df3_excel.to_excel(xw3, index=False, sheet_name="Detail_Settlement")
+            df3.to_excel(xw3, index=False, sheet_name="Detail_Settlement")
 
             wsname3 = "Detail_Settlement_View"
-            df3_excel_fmt.to_excel(xw3, index=False, header=False, sheet_name=wsname3, startrow=2)
-
+            df3_fmt.to_excel(xw3, index=False, header=False, sheet_name=wsname3, startrow=2)
             wb3 = xw3.book
             ws3 = wb3[wsname3]
 
-            cols3 = list(df3_excel.columns)
+            cols3 = list(df3.columns)
             top_headers = []
             sub_headers = []
             for c in cols3:
-                if c in ("NO", "Tanggal"):
+                if c in ("NO","Tanggal"):
                     top_headers.append("")
                     sub_headers.append(c)
-                elif c.startswith("GS|"):
+                elif str(c).startswith("GS|"):
                     top_headers.append("GO SHOW")
-                    sub_headers.append(c[3:])
-                elif c.startswith("ON|"):
+                    sub_headers.append(str(c)[3:])
+                elif str(c).startswith("ON|"):
                     top_headers.append("ONLINE")
-                    sub_headers.append(c[3:])
+                    sub_headers.append(str(c)[3:])
                 else:
                     top_headers.append("")
-                    sub_headers.append(c)
+                    sub_headers.append(str(c))
 
             for j, (top, sub) in enumerate(zip(top_headers, sub_headers), start=1):
                 ws3.cell(row=1, column=j, value=top)
@@ -976,8 +884,8 @@ if go:
                     end = start
                     while end + 1 < len(labels) and labels[end + 1] == labels[start]:
                         end += 1
-                    label0 = labels[start]
-                    if label0 not in ("", None) and end >= start:
+                    label = labels[start]
+                    if label not in ("", None) and end >= start:
                         ws3.merge_cells(start_row=row_idx, start_column=start + 1,
                                         end_row=row_idx, end_column=end + 1)
                     start = end + 1
@@ -997,57 +905,53 @@ if go:
             ws3.row_dimensions[1].height = 22
             ws3.row_dimensions[2].height = 22
 
-            sample_rows = min(50, df3_excel_fmt.shape[0])
+            sample_rows = min(50, df3_fmt.shape[0])
             for idx_col, col_name in enumerate(cols3, start=1):
-                max_len = max(len(str(col_name)), len(str(sub_headers[idx_col - 1])), len(str(top_headers[idx_col - 1])))
+                max_len = max(len(str(col_name)), len(str(sub_headers[idx_col-1])), len(str(top_headers[idx_col-1])))
                 for r in range(3, 3 + sample_rows):
                     v = ws3.cell(row=r, column=idx_col).value
                     if v is not None:
                         max_len = max(max_len, len(str(v)))
                 ws3.column_dimensions[get_column_letter(idx_col)].width = min(max(10, max_len + 2), 45)
 
-        detail_settle_bytes = bio_settle.getvalue()
+        detail_settle_excel_bytes = bio_settle.getvalue()
 
     # =========================
-    # SIMPAN KE SESSION_STATE (ini kunci agar tidak perlu proses ulang saat download)
+    # SIMPAN HASIL ke session_state (agar klik download tidak menghilangkan hasil)
     # =========================
     periode = f"{y}-{m:02d}"
-
     st.session_state["HASIL"]["rekon"] = {
         "periode": periode,
         "table": fmt,
         "excel_bytes": bio.getvalue(),
     }
-
-    if df2_fmt is not None:
+    if df2_fmt_mi is not None:
         st.session_state["HASIL"]["detail_tiket"] = {
             "periode": periode,
-            "table": df2_fmt,
+            "table": df2_fmt_mi,
         }
     else:
         st.session_state["HASIL"].pop("detail_tiket", None)
 
-    if df3_fmt is not None and detail_settle_bytes is not None:
+    if detail_settle_table is not None and detail_settle_excel_bytes is not None:
         st.session_state["HASIL"]["detail_settlement"] = {
             "periode": periode,
-            "table": df3_fmt,
-            "excel_bytes": detail_settle_bytes,
+            "table": detail_settle_table,
+            "excel_bytes": detail_settle_excel_bytes,
         }
     else:
         st.session_state["HASIL"].pop("detail_settlement", None)
 
-    # optional: scroll to results
-    st.success("Proses selesai. Hasil disimpan, aman walau klik tombol unduh.")
-    # st.rerun()  # tidak wajib
+    st.success("Proses selesai. Hasil tersimpan (klik download tidak perlu proses ulang).")
+
 
 # =========================
-# RENDER HASIL TERSIMPAN (tetap muncul walau klik download)
+# RENDER HASIL TERSIMPAN
 # =========================
-
 hasil = st.session_state.get("HASIL", {})
 
 if "rekon" in hasil:
-    st.subheader("Hasil Rekonsiliasi per Tanggal")
+    st.subheader("Hasil Rekonsiliasi per Tanggal (mengikuti bulan parameter)")
     st.caption(f"Periode tersimpan: {hasil['rekon']['periode']}")
     st.dataframe(hasil["rekon"]["table"], use_container_width=True, hide_index=True)
 
@@ -1061,7 +965,7 @@ if "rekon" in hasil:
     )
 
 if "detail_tiket" in hasil:
-    st.subheader("Detail Tiket per Tanggal — GO SHOW & ONLINE × SUB-TIPE (SEMUA STATUS)")
+    st.subheader("Detail Tiket per Tanggal — TYPE: GO SHOW & ONLINE × SUB-TIPE (J) [SEMUA STATUS]")
     st.caption(f"Periode tersimpan: {hasil['detail_tiket']['periode']}")
     st.dataframe(hasil["detail_tiket"]["table"], use_container_width=True, hide_index=True)
 
