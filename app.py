@@ -608,7 +608,7 @@ if go:
 
     # ======================================================================
     # ===========  TABEL: DETAIL TIKET (GO SHOW × SUB-KATEGORI)  ===========
-    #                 (CHANGED: PAID ONLY)
+    #                 (PAID only)
     # ======================================================================
 
     def _col_by_letter_local(df: pd.DataFrame, letters: str) -> Optional[str]:
@@ -636,8 +636,7 @@ if go:
     date_col      = _find_col(tiket_df, ["Action/Action Date","Action Date","Action","Action date"]) or _col_by_letter_local(tiket_df, "AG")
     tarif_col     = _find_col(tiket_df, ["Tarif","tarif"]) or _col_by_letter_local(tiket_df, "Y")
 
-    # ✅ NEW: status col (wajib untuk paid-only)
-    status_col = _find_col(tiket_df, ["St Bayar", "Status Bayar", "status bayar", "status"])
+    status_col    = _find_col(tiket_df, ["St Bayar","Status Bayar","status bayar","status"])
 
     required_missing = [n for n, c in [
         ("TYPE (kolom B)", type_main_col),
@@ -658,12 +657,10 @@ if go:
         tix = tix[~tix[date_col].isna()]
         tix = tix[(tix[date_col] >= month_start) & (tix[date_col] <= month_end)]
 
-        # ✅ NEW: filter PAID ONLY
+        # PAID only
         stat_norm = tix[status_col].apply(_norm_str)
-        paid_only_mask = stat_norm.eq("paid") | stat_norm.str.contains(r"\bpaid\b", na=False)
-        tix = tix[paid_only_mask]
+        tix = tix[stat_norm.eq("paid") | stat_norm.str.contains(r"\bpaid\b", na=False)]
 
-        # norms (setelah filter paid)
         main_norm_all = tix[type_main_col].apply(_norm_str)
         sub_norm_all  = tix[type_sub_col].apply(_norm_str)
         bank_norm_all = tix[bank_col].apply(_norm_str)
@@ -834,6 +831,32 @@ if go:
         for k, ser in cols_det.items():
             detail_settle[k] = ser.values
 
+        # Totals requested
+        detail_settle["GS|Total Settlement (Go Show)"] = (
+            detail_settle["GS|VIRTUAL ACCOUNT - BCA"]
+            + detail_settle["GS|VIRTUAL ACCOUNT - NON BCA"]
+            + detail_settle["GS|E-MONEY"]
+        )
+        detail_settle["ON|Total Settlement (Online)"] = (
+            detail_settle["ON|VIRTUAL ACCOUNT - BCA"]
+            + detail_settle["ON|VIRTUAL ACCOUNT - NON BCA"]
+            + detail_settle["ON|E-MONEY"]
+        )
+
+        # Keep a stable column order (incl. totals at the end of each group)
+        detail_settle = detail_settle[
+            [
+                "GS|VIRTUAL ACCOUNT - BCA",
+                "GS|VIRTUAL ACCOUNT - NON BCA",
+                "GS|E-MONEY",
+                "GS|Total Settlement (Go Show)",
+                "ON|VIRTUAL ACCOUNT - BCA",
+                "ON|VIRTUAL ACCOUNT - NON BCA",
+                "ON|E-MONEY",
+                "ON|Total Settlement (Online)",
+            ]
+        ]
+
         df3 = detail_settle.reset_index()
         df3.insert(0, "NO", range(1, len(df3) + 1))
 
@@ -858,8 +881,7 @@ if go:
                 return ("ONLINE", col_name[3:])
             return ("", col_name)
 
-        ordered = [k for k in detail_settle.columns if k.startswith("GS|")] + \
-                  [k for k in detail_settle.columns if k.startswith("ON|")]
+        ordered = list(detail_settle.columns)
 
         df3_fmt = df3_fmt[["NO", "Tanggal"] + ordered]
         top3 = [("", "NO"), ("", "Tanggal")] + [_split_head(k) for k in ordered]
@@ -952,9 +974,9 @@ if go:
 
     if detail_settle_table is not None and detail_settle_excel_bytes is not None:
         st.session_state["HASIL"]["detail_settlement"] = {
-            "periode": periode,
-            "table": detail_settle_table,
-            "excel_bytes": detail_settle_excel_bytes,
+         "periode": periode,
+         "table": detail_settle_table,
+         "excel_bytes": detail_settle_excel_bytes,
         }
     else:
         st.session_state["HASIL"].pop("detail_settlement", None)
@@ -962,6 +984,9 @@ if go:
     st.success("Proses selesai. Hasil tersimpan (klik download tidak perlu proses ulang).")
 
 
+# =========================
+# RENDER HASIL TERSIMPAN (dengan angka rata kanan)
+# =========================
 hasil = st.session_state.get("HASIL", {})
 
 if "rekon" in hasil:
