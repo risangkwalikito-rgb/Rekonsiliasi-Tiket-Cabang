@@ -348,7 +348,12 @@ if "HASIL" not in st.session_state:
 
 with st.sidebar:
     st.header("1) Upload Sumber (multi-file)")
-    tiket_files = st.file_uploader("Tiket Detail (Excel .xls/.xlsx/.zip)", type=["xls","xlsx","zip"], accept_multiple_files=True)
+    # ✅ CHANGE: tiket detail now accepts CSV
+    tiket_files = st.file_uploader(
+        "Tiket Detail (CSV/Excel .csv/.xls/.xlsx/.zip)",
+        type=["csv", "xls", "xlsx", "zip"],
+        accept_multiple_files=True,
+    )
     settle_files = st.file_uploader("Settlement Dana (CSV/Excel/.zip)", type=["csv","xls","xlsx","zip"], accept_multiple_files=True)
     st.divider()
     st.header("Rekening Koran (opsional, multi-file)")
