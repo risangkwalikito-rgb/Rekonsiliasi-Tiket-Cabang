@@ -1,12 +1,3 @@
-# app.py
-# -*- coding: utf-8 -*-
-"""
-Rekonsiliasi: Tiket Detail vs Settlement Dana
-- PERSIST hasil (tidak hilang saat klik Download → tidak perlu proses ulang)
-- Pengambilan & perhitungan data TIKET DETAIL dikembalikan seperti semula
-- Tampilan angka rata kanan (NO center, Tanggal left)
-"""
-
 from __future__ import annotations
 
 import io
@@ -342,13 +333,11 @@ def _month_selector() -> Tuple[int, int]:
 st.set_page_config(page_title="Rekonsiliasi Tiket vs Settlement", layout="wide")
 st.title("Rekonsiliasi: Tiket Detail vs Settlement Dana")
 
-# Persist hasil agar tidak hilang saat klik download (Streamlit rerun)
 if "HASIL" not in st.session_state:
     st.session_state["HASIL"] = {}
 
 with st.sidebar:
     st.header("1) Upload Sumber (multi-file)")
-    # ✅ CHANGE: tiket detail now accepts CSV
     tiket_files = st.file_uploader(
         "Tiket Detail (CSV/Excel .csv/.xls/.xlsx/.zip)",
         type=["csv", "xls", "xlsx", "zip"],
@@ -433,7 +422,7 @@ if go:
     if s_prod_P is None and not settle_df.empty and len(settle_df.columns) >= 16:
         s_prod_P = settle_df.columns[15]
 
-    # ------------------  TABEL 1: TIKET DETAIL ESPAY (SEMU ALA) -------------------
+    # ------------------  TABEL 1: TIKET DETAIL ESPAY (PAID ONLY) -------------------
     td = tiket_df.copy()
     td[t_date_action] = td[t_date_action].apply(_to_date)
     td = td[~td[t_date_action].isna()]
@@ -448,9 +437,7 @@ if go:
     td = td[(td[t_date_action] >= month_start) & (td[t_date_action] <= month_end)]
 
     td[t_amt_tarif] = _to_num(td[t_amt_tarif])
-
     td = td.drop_duplicates()
-
     tiket_by_date = td.groupby(td[t_date_action].dt.date, dropna=True)[t_amt_tarif].sum()
 
     # ------------------  Settlement Dana (utama/legacy) ------------------
@@ -621,7 +608,7 @@ if go:
 
     # ======================================================================
     # ===========  TABEL: DETAIL TIKET (GO SHOW × SUB-KATEGORI)  ===========
-    #            (SEMU ALA, TIDAK DIOTAK-ATIK)
+    #                 (CHANGED: PAID ONLY)
     # ======================================================================
 
     def _col_by_letter_local(df: pd.DataFrame, letters: str) -> Optional[str]:
@@ -649,17 +636,21 @@ if go:
     date_col      = _find_col(tiket_df, ["Action/Action Date","Action Date","Action","Action date"]) or _col_by_letter_local(tiket_df, "AG")
     tarif_col     = _find_col(tiket_df, ["Tarif","tarif"]) or _col_by_letter_local(tiket_df, "Y")
 
+    # ✅ NEW: status col (wajib untuk paid-only)
+    status_col = _find_col(tiket_df, ["St Bayar", "Status Bayar", "status bayar", "status"])
+
     required_missing = [n for n, c in [
         ("TYPE (kolom B)", type_main_col),
         ("BANK (kolom I)", bank_col),
         ("TIPE / SUB-TIPE (kolom J)", type_sub_col),
         ("ACTION DATE (kolom AG)", date_col),
         ("TARIF (kolom Y)", tarif_col),
+        ("ST BAYAR / STATUS BAYAR", status_col),
     ] if c is None]
 
     df2_fmt_mi = None
     if required_missing:
-        st.warning("Kolom wajib untuk tabel 'Detail Tiket (GO SHOW/ONLINE)' belum lengkap: " + ", ".join(required_missing))
+        st.warning("Kolom wajib untuk tabel 'Detail Tiket (GO SHOW/ONLINE) [PAID]' belum lengkap: " + ", ".join(required_missing))
     else:
         tix = tiket_df.copy()
 
@@ -667,6 +658,12 @@ if go:
         tix = tix[~tix[date_col].isna()]
         tix = tix[(tix[date_col] >= month_start) & (tix[date_col] <= month_end)]
 
+        # ✅ NEW: filter PAID ONLY
+        stat_norm = tix[status_col].apply(_norm_str)
+        paid_only_mask = stat_norm.eq("paid") | stat_norm.str.contains(r"\bpaid\b", na=False)
+        tix = tix[paid_only_mask]
+
+        # norms (setelah filter paid)
         main_norm_all = tix[type_main_col].apply(_norm_str)
         sub_norm_all  = tix[type_sub_col].apply(_norm_str)
         bank_norm_all = tix[bank_col].apply(_norm_str)
@@ -871,7 +868,6 @@ if go:
 
         detail_settle_table = df3_fmt_mi
 
-        # Excel detail settlement
         from openpyxl.styles import Alignment, Font
         from openpyxl.utils import get_column_letter
 
@@ -943,9 +939,6 @@ if go:
 
         detail_settle_excel_bytes = bio_settle.getvalue()
 
-    # =========================
-    # SIMPAN HASIL ke session_state
-    # =========================
     periode = f"{y}-{m:02d}"
     st.session_state["HASIL"]["rekon"] = {
         "periode": periode,
@@ -969,9 +962,6 @@ if go:
     st.success("Proses selesai. Hasil tersimpan (klik download tidak perlu proses ulang).")
 
 
-# =========================
-# RENDER HASIL TERSIMPAN (dengan angka rata kanan)
-# =========================
 hasil = st.session_state.get("HASIL", {})
 
 if "rekon" in hasil:
@@ -989,7 +979,7 @@ if "rekon" in hasil:
     )
 
 if "detail_tiket" in hasil:
-    st.subheader("Detail Tiket per Tanggal — TYPE: GO SHOW & ONLINE × SUB-TIPE (J) [SEMUA STATUS]")
+    st.subheader("Detail Tiket per Tanggal — TYPE: GO SHOW & ONLINE × SUB-TIPE (J) [HANYA PAID]")
     st.caption(f"Periode tersimpan: {hasil['detail_tiket']['periode']}")
     st.dataframe(_style_right(hasil["detail_tiket"]["table"]), use_container_width=True, hide_index=True)
 
