@@ -1,12 +1,3 @@
-# app.py
-# -*- coding: utf-8 -*-
-"""
-Rekonsiliasi: Tiket Detail vs Settlement Dana
-- PERSIST hasil (tidak hilang saat klik Download → tidak perlu proses ulang)
-- Pengambilan & perhitungan data TIKET DETAIL dikembalikan seperti semula
-- Tampilan angka rata kanan (NO center, Tanggal left)
-"""
-
 from __future__ import annotations
 
 import io
@@ -69,35 +60,6 @@ _ddmmyyyy = re.compile(r"\b(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{2,4})\b")
 def _to_date(val) -> Optional[pd.Timestamp]:
     if pd.isna(val):
         return None
-
-
-def _fill_action_from_created(df: pd.DataFrame, action_col: str, created_col: str) -> pd.DataFrame:
-    """Fill empty Action-like column using Created timestamp (yyyy-mm-dd hh:mm:ss → yyyy-mm-dd).
-
-    Only touches rows where Action is blank/NaN, and only when action_col name contains 'action'.
-    """
-    if df is None or df.empty or not action_col or not created_col:
-        return df
-
-    action_key = str(action_col).strip().lower()
-    if "action" not in action_key:
-        return df
-
-    action_raw = df[action_col]
-    action_str = action_raw.astype(str).str.strip().str.lower()
-    empty_mask = action_raw.isna() | action_str.eq("") | action_str.eq("nan") | action_str.eq("none")
-
-    if not empty_mask.any():
-        return df
-
-    created_dt = pd.to_datetime(df[created_col], errors="coerce")
-    filled = created_dt.dt.strftime("%Y-%m-%d")
-
-    fallback = df[created_col].astype(str).str.strip().str.slice(0, 10)
-    filled = filled.where(created_dt.notna(), fallback)
-
-    df.loc[empty_mask, action_col] = filled.loc[empty_mask]
-    return df
     if isinstance(val, (int, float, np.number)):
         if not np.isfinite(val):
             return None
@@ -131,6 +93,32 @@ def _fill_action_from_created(df: pd.DataFrame, action_col: str, created_col: st
         except Exception:
             continue
     return None
+
+
+def _fill_action_from_created(df: pd.DataFrame, action_col: str, created_col: str) -> pd.DataFrame:
+    """Isi kolom Action dari kolom Created jika Action kosong.
+
+    Created biasanya format 'yyyy-mm-dd hh:mm:ss' → yang dipakai hanya 'yyyy-mm-dd'.
+    Hanya mengisi baris Action yang kosong/NaN.
+    """
+    if df is None or df.empty or not action_col or not created_col:
+        return df
+
+    action_raw = df[action_col]
+    action_str = action_raw.astype(str).str.strip().str.lower()
+    empty_mask = action_raw.isna() | action_str.eq("") | action_str.eq("nan") | action_str.eq("none")
+    if not empty_mask.any():
+        return df
+
+    created_dt = pd.to_datetime(df[created_col], errors="coerce")
+    filled = created_dt.dt.strftime("%Y-%m-%d")
+
+    # fallback untuk string non-parseable: ambil 10 char pertama
+    fallback = df[created_col].astype(str).str.strip().str.slice(0, 10)
+    filled = filled.where(created_dt.notna(), fallback)
+
+    df.loc[empty_mask, action_col] = filled.loc[empty_mask]
+    return df
 
 def _read_any(uploaded_file) -> pd.DataFrame:
     """Baca CSV/Excel. .xls → xlrd; fallback pyexcel-xls; terakhir coba openpyxl."""
@@ -371,13 +359,11 @@ def _month_selector() -> Tuple[int, int]:
 st.set_page_config(page_title="Rekonsiliasi Tiket vs Settlement", layout="wide")
 st.title("Rekonsiliasi: Tiket Detail vs Settlement Dana")
 
-# Persist hasil agar tidak hilang saat klik download (Streamlit rerun)
 if "HASIL" not in st.session_state:
     st.session_state["HASIL"] = {}
 
 with st.sidebar:
     st.header("1) Upload Sumber (multi-file)")
-    # ✅ CHANGE: tiket detail now accepts CSV
     tiket_files = st.file_uploader(
         "Tiket Detail (CSV/Excel .csv/.xls/.xlsx/.zip)",
         type=["csv", "xls", "xlsx", "zip"],
@@ -421,9 +407,9 @@ if go:
         st.stop()
 
     # ---------------------- Tiket Detail (TABEL 1) ----------------------
-    t_date_action = _find_col(tiket_df, ["Action/Action Date","Action Date","Action","Action date"])
+    t_date_action = _find_col(tiket_df, ["Action Date","Action"])
     if t_date_action is None:
-        st.error("Kolom tanggal 'Action Date' tidak ditemukan pada Tiket Detail.")
+        st.error("Kolom tanggal 'Action Date' / 'Action' tidak ditemukan pada Tiket Detail.")
         st.stop()
 
     t_amt_tarif = _find_col(tiket_df, ["Tarif","tarif"])
@@ -463,11 +449,13 @@ if go:
         s_prod_P = settle_df.columns[15]
 
     # ------------------  TABEL 1: TIKET DETAIL ESPAY (SEMU ALA) -------------------
-    t_created = _find_col(tiket_df, ["Created", "Created Date", "Created At", "Created Time"])
     td = tiket_df.copy()
+    t_created = _find_col(tiket_df, ["Created","Created Date","Created At","Created Time"])
     if t_created is not None:
         td = _fill_action_from_created(td, t_date_action, t_created)
-    td[t_date_action] = td[t_date_action].apply(_to_date)
+
+    # pastikan dtype datetime64 agar .dt aman
+    td[t_date_action] = pd.to_datetime(td[t_date_action].apply(_to_date), errors="coerce")
     td = td[~td[t_date_action].isna()]
 
     td_bank_norm = td[t_bank].apply(_norm_str)
@@ -653,7 +641,6 @@ if go:
 
     # ======================================================================
     # ===========  TABEL: DETAIL TIKET (GO SHOW × SUB-KATEGORI)  ===========
-    #            (SEMU ALA, TIDAK DIOTAK-ATIK)
     # ======================================================================
 
     def _col_by_letter_local(df: pd.DataFrame, letters: str) -> Optional[str]:
@@ -678,8 +665,9 @@ if go:
             "Tipe","Tipe Pembayaran","Jenis Pembayaran","Kategori","Metode","Product Type"
         ]) or _col_by_letter_local(tiket_df, "J")
     )
-    date_col      = _find_col(tiket_df, ["Action/Action Date","Action Date","Action","Action date"]) or _col_by_letter_local(tiket_df, "AG")
+    date_col      = _find_col(tiket_df, ["Action Date","Action"]) or _col_by_letter_local(tiket_df, "AG")
     tarif_col     = _find_col(tiket_df, ["Tarif","tarif"]) or _col_by_letter_local(tiket_df, "Y")
+    status_col    = _find_col(tiket_df, ["St Bayar","Status Bayar","status","status bayar"])
 
     required_missing = [n for n, c in [
         ("TYPE (kolom B)", type_main_col),
@@ -687,21 +675,26 @@ if go:
         ("TIPE / SUB-TIPE (kolom J)", type_sub_col),
         ("ACTION DATE (kolom AG)", date_col),
         ("TARIF (kolom Y)", tarif_col),
+        ("ST BAYAR / STATUS BAYAR", status_col),
     ] if c is None]
 
     df2_fmt_mi = None
     if required_missing:
-        st.warning("Kolom wajib untuk tabel 'Detail Tiket (GO SHOW/ONLINE)' belum lengkap: " + ", ".join(required_missing))
+        st.warning("Kolom wajib untuk tabel 'Detail Tiket (GO SHOW/ONLINE) [PAID]' belum lengkap: " + ", ".join(required_missing))
     else:
         tix = tiket_df.copy()
 
-        t_created = _find_col(tiket_df, ["Created", "Created Date", "Created At", "Created Time"])
+        t_created = _find_col(tiket_df, ["Created","Created Date","Created At","Created Time"])
         if t_created is not None:
             tix = _fill_action_from_created(tix, date_col, t_created)
 
-        tix[date_col] = tix[date_col].apply(_to_date)
+        # pastikan dtype datetime64 agar .dt aman
+        tix[date_col] = pd.to_datetime(tix[date_col].apply(_to_date), errors="coerce")
         tix = tix[~tix[date_col].isna()]
         tix = tix[(tix[date_col] >= month_start) & (tix[date_col] <= month_end)]
+
+        stat_norm = tix[status_col].apply(_norm_str)
+        tix = tix[stat_norm.eq("paid") | stat_norm.str.contains(r"\bpaid\b", na=False)]
 
         main_norm_all = tix[type_main_col].apply(_norm_str)
         sub_norm_all  = tix[type_sub_col].apply(_norm_str)
@@ -791,10 +784,7 @@ if go:
         for c in df2_fmt.columns:
             if c in ("NO", "Tanggal"):
                 continue
-            if pd.api.types.is_numeric_dtype(df2_fmt[c]):
-                df2_fmt[c] = df2_fmt[c].map(_idr_fmt)
-            else:
-                df2_fmt[c] = df2_fmt[c].apply(_idr_fmt)
+            df2_fmt[c] = df2_fmt[c].apply(_idr_fmt)
 
         def _strip_prefix(col_name: str) -> tuple[str, str]:
             if col_name.startswith("GS|"):
@@ -873,6 +863,32 @@ if go:
         for k, ser in cols_det.items():
             detail_settle[k] = ser.values
 
+        # Totals requested
+        detail_settle["GS|Total Settlement (Go Show)"] = (
+            detail_settle["GS|VIRTUAL ACCOUNT - BCA"]
+            + detail_settle["GS|VIRTUAL ACCOUNT - NON BCA"]
+            + detail_settle["GS|E-MONEY"]
+        )
+        detail_settle["ON|Total Settlement (Online)"] = (
+            detail_settle["ON|VIRTUAL ACCOUNT - BCA"]
+            + detail_settle["ON|VIRTUAL ACCOUNT - NON BCA"]
+            + detail_settle["ON|E-MONEY"]
+        )
+
+        # order: totals at end of each group
+        detail_settle = detail_settle[
+            [
+                "GS|VIRTUAL ACCOUNT - BCA",
+                "GS|VIRTUAL ACCOUNT - NON BCA",
+                "GS|E-MONEY",
+                "GS|Total Settlement (Go Show)",
+                "ON|VIRTUAL ACCOUNT - BCA",
+                "ON|VIRTUAL ACCOUNT - NON BCA",
+                "ON|E-MONEY",
+                "ON|Total Settlement (Online)",
+            ]
+        ]
+
         df3 = detail_settle.reset_index()
         df3.insert(0, "NO", range(1, len(df3) + 1))
 
@@ -897,8 +913,7 @@ if go:
                 return ("ONLINE", col_name[3:])
             return ("", col_name)
 
-        ordered = [k for k in detail_settle.columns if k.startswith("GS|")] + \
-                  [k for k in detail_settle.columns if k.startswith("ON|")]
+        ordered = list(detail_settle.columns)
 
         df3_fmt = df3_fmt[["NO", "Tanggal"] + ordered]
         top3 = [("", "NO"), ("", "Tanggal")] + [_split_head(k) for k in ordered]
@@ -979,9 +994,6 @@ if go:
 
         detail_settle_excel_bytes = bio_settle.getvalue()
 
-    # =========================
-    # SIMPAN HASIL ke session_state
-    # =========================
     periode = f"{y}-{m:02d}"
     st.session_state["HASIL"]["rekon"] = {
         "periode": periode,
@@ -995,9 +1007,9 @@ if go:
 
     if detail_settle_table is not None and detail_settle_excel_bytes is not None:
         st.session_state["HASIL"]["detail_settlement"] = {
-            "periode": periode,
-            "table": detail_settle_table,
-            "excel_bytes": detail_settle_excel_bytes,
+         "periode": periode,
+         "table": detail_settle_table,
+         "excel_bytes": detail_settle_excel_bytes,
         }
     else:
         st.session_state["HASIL"].pop("detail_settlement", None)
@@ -1025,7 +1037,7 @@ if "rekon" in hasil:
     )
 
 if "detail_tiket" in hasil:
-    st.subheader("Detail Tiket per Tanggal — TYPE: GO SHOW & ONLINE × SUB-TIPE (J) [SEMUA STATUS]")
+    st.subheader("Detail Tiket per Tanggal — TYPE: GO SHOW & ONLINE × SUB-TIPE (J) [HANYA PAID]")
     st.caption(f"Periode tersimpan: {hasil['detail_tiket']['periode']}")
     st.dataframe(_style_right(hasil["detail_tiket"]["table"]), use_container_width=True, hide_index=True)
 
