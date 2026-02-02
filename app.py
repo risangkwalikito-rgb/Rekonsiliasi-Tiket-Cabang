@@ -547,11 +547,7 @@ if go:
 
     td[t_amt_tarif] = _to_num(td[t_amt_tarif])
 
-    # >>> FIX UTAMA:
-    # Jangan drop duplicates untuk kolom TIKET DETAIL ESPAY.
-    # Karena user minta "abaikan duplicate khusus tiket detail" (artinya semua baris tetap dihitung).
-    # td = td.drop_duplicates()   # <-- DIHAPUS
-
+    # FIX: ABAIKAN DUPLICATE UNTUK TIKET DETAIL (jangan drop_duplicates)
     tiket_by_date = td.groupby(td[t_date_action].dt.date, dropna=True)[t_amt_tarif].sum()
 
     # ------------------  Settlement Dana (utama/legacy) ------------------
@@ -627,7 +623,7 @@ if go:
     final["SELISIH TIKET DETAIL - SETTLEMENT"] = final["TIKET DETAIL ESPAY"] - final["SETTLEMENT DANA ESPAY"]
     final["SETTLEMENT BCA"] = bca_series.values
     final["SETTLEMENT NON BCA"] = non_bca_series.values
-    final["TOTAL SETTLEMENT"] = total_settle_ser.values
+    final["TOTAL SETTLEMENT"] = (bca_series.values + non_bca_series.values)
     final["UANG MASUK BCA"] = uang_masuk_bca_ser.values
     final["UANG MASUK NON BCA"] = uang_masuk_non_ser.values
     final["TOTAL UANG MASUK"] = total_uang_masuk_ser.values
@@ -787,8 +783,12 @@ if go:
         m_varetail_all = sub_norm_all.str.contains(r"virtual\s*account", na=False) & sub_norm_all.str.contains(r"gerai|retail", na=False)
         m_cash_all = (sub_norm_all == "cash") | sub_norm_all.str.contains(r"\bcash\b", na=False)
 
+        # TAMBAHAN: TRANSFER (kolom J mengandung "transfer")
+        m_tf_all = sub_norm_all.str.contains(r"\btransfer\b", na=False)
+
         idx2 = pd.Index(pd.date_range(month_start, month_end, freq="D").date, name="Tanggal")
 
+        # ---------------- GO SHOW existing ----------------
         s_gs_prepaid_bca = tix.loc[m_go_show & m_prepaid_all & bank_norm_all.eq("bca")].groupby(tix[date_col].dt.date, dropna=True)[tarif_col].sum()
         s_gs_prepaid_bri = tix.loc[m_go_show & m_prepaid_all & bank_norm_all.eq("bri")].groupby(tix[date_col].dt.date, dropna=True)[tarif_col].sum()
         s_gs_prepaid_bni = tix.loc[m_go_show & m_prepaid_all & bank_norm_all.eq("bni")].groupby(tix[date_col].dt.date, dropna=True)[tarif_col].sum()
@@ -797,16 +797,35 @@ if go:
         s_gs_varetail_espay = tix.loc[m_go_show & m_varetail_all & bank_norm_all.eq("espay")].groupby(tix[date_col].dt.date, dropna=True)[tarif_col].sum()
         s_gs_cash_asdp = tix.loc[m_go_show & m_cash_all & bank_norm_all.eq("asdp")].groupby(tix[date_col].dt.date, dropna=True)[tarif_col].sum()
 
+        # ---------------- GO SHOW TRANSFER (BARU) ----------------
+        # PT.POS variasi: "pt.pos", "pt pos", "ptpos", "pos"
+        m_bank_ptpos = bank_norm_all.str.contains(r"\b(pt\.?\s*pos|ptpos|pos)\b", na=False)
+
+        s_gs_tf_ptpos = tix.loc[m_go_show & m_tf_all & m_bank_ptpos].groupby(tix[date_col].dt.date, dropna=True)[tarif_col].sum()
+        s_gs_tf_bri = tix.loc[m_go_show & m_tf_all & bank_norm_all.eq("bri")].groupby(tix[date_col].dt.date, dropna=True)[tarif_col].sum()
+        s_gs_tf_bni = tix.loc[m_go_show & m_tf_all & bank_norm_all.eq("bni")].groupby(tix[date_col].dt.date, dropna=True)[tarif_col].sum()
+        s_gs_tf_mandiri = tix.loc[m_go_show & m_tf_all & bank_norm_all.eq("mandiri")].groupby(tix[date_col].dt.date, dropna=True)[tarif_col].sum()
+        s_gs_tf_bca = tix.loc[m_go_show & m_tf_all & bank_norm_all.eq("bca")].groupby(tix[date_col].dt.date, dropna=True)[tarif_col].sum()
+
         go_show_cols = {
             "PREPAID - BCA": s_gs_prepaid_bca.reindex(idx2, fill_value=0.0),
             "PREPAID - BRI": s_gs_prepaid_bri.reindex(idx2, fill_value=0.0),
             "PREPAID - BNI": s_gs_prepaid_bni.reindex(idx2, fill_value=0.0),
             "PREPAID - MANDIRI": s_gs_prepaid_mandiri.reindex(idx2, fill_value=0.0),
+
+            # KOLOM BARU (TRANSFER) MASUK GRUP GO SHOW
+            "TF - PT.POS": s_gs_tf_ptpos.reindex(idx2, fill_value=0.0),
+            "TF - BRI": s_gs_tf_bri.reindex(idx2, fill_value=0.0),
+            "TF - BNI": s_gs_tf_bni.reindex(idx2, fill_value=0.0),
+            "TF - MANDIRI": s_gs_tf_mandiri.reindex(idx2, fill_value=0.0),
+            "TF - BCA": s_gs_tf_bca.reindex(idx2, fill_value=0.0),
+
             "E-MONEY - ESPAY": s_gs_emoney_espay.reindex(idx2, fill_value=0.0),
             "VIRTUAL ACCOUNT DAN GERAI RETAIL - ESPAY": s_gs_varetail_espay.reindex(idx2, fill_value=0.0),
             "CASH - ASDP": s_gs_cash_asdp.reindex(idx2, fill_value=0.0),
         }
 
+        # ---------------- ONLINE existing ----------------
         m_emoney_on = (sub_norm_all == "e-money") | sub_norm_all.str.contains(r"\be[-\s]*money\b|\bemoney\b", na=False)
         m_varetail_on = sub_norm_all.str.contains(r"virtual\s*account", na=False) & sub_norm_all.str.contains(r"gerai|retail", na=False)
         m_cash_on = (sub_norm_all == "cash") | sub_norm_all.str.contains(r"\bcash\b", na=False)
