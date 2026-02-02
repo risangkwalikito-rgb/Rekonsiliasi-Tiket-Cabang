@@ -128,14 +128,12 @@ def _fill_action_from_created(df: pd.DataFrame, action_col: str, created_col: st
 
     created_str = df[created_col].astype(str).str.strip()
 
-    # prefer dd/mm parsing, fallback untuk yyyy-mm
     dt_dayfirst = pd.to_datetime(created_str, errors="coerce", dayfirst=True)
     dt_monthfirst = pd.to_datetime(created_str, errors="coerce", dayfirst=False)
     created_dt = dt_dayfirst.fillna(dt_monthfirst)
 
     filled = created_dt.dt.strftime("%d/%m/%Y")
 
-    # fallback terakhir (string): ambil 10 char pertama, lalu normalize yyyy-mm-dd → dd/mm/yyyy
     fallback = created_str.str.slice(0, 10)
     ymd = fallback.str.match(r"^\d{4}-\d{2}-\d{2}$", na=False)
     fallback_norm = fallback.copy()
@@ -548,7 +546,12 @@ if go:
     td = td[(td[t_date_action] >= month_start) & (td[t_date_action] <= month_end)]
 
     td[t_amt_tarif] = _to_num(td[t_amt_tarif])
-    td = td.drop_duplicates()
+
+    # >>> FIX UTAMA:
+    # Jangan drop duplicates untuk kolom TIKET DETAIL ESPAY.
+    # Karena user minta "abaikan duplicate khusus tiket detail" (artinya semua baris tetap dihitung).
+    # td = td.drop_duplicates()   # <-- DIHAPUS
+
     tiket_by_date = td.groupby(td[t_date_action].dt.date, dropna=True)[t_amt_tarif].sum()
 
     # ------------------  Settlement Dana (utama/legacy) ------------------
