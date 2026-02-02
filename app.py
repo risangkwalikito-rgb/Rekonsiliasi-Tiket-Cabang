@@ -419,6 +419,19 @@ def _month_selector() -> Tuple[int, int]:
 st.set_page_config(page_title="Rekonsiliasi Tiket vs Settlement", layout="wide")
 st.title("Rekonsiliasi: Tiket Detail vs Settlement Dana")
 
+# --- FORCE ALIGNMENT: angka kanan, NO center, TANGGAL kiri (UI Streamlit) ---
+st.markdown(
+    """
+    <style>
+    div[data-testid="stDataFrame"] td { text-align: right !important; }
+    div[data-testid="stDataFrame"] th { text-align: center !important; }
+    div[data-testid="stDataFrame"] td:nth-child(1) { text-align: center !important; }
+    div[data-testid="stDataFrame"] td:nth-child(2) { text-align: left !important; }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+
 if "HASIL" not in st.session_state:
     st.session_state["HASIL"] = {}
 
@@ -477,30 +490,7 @@ if go:
     if settle_df.empty:
         st.error("Settlement Dana kosong / belum diupload.")
         st.stop()
-# --- FORCE ALIGNMENT: angka kanan, NO center, TANGGAL kiri ---
-st.markdown(
-    """
-    <style>
-    /* semua sel angka rata kanan */
-    div[data-testid="stDataFrame"] td {
-        text-align: right !important;
-    }
-    /* header center */
-    div[data-testid="stDataFrame"] th {
-        text-align: center !important;
-    }
-    /* kolom 1 = NO center */
-    div[data-testid="stDataFrame"] td:nth-child(1) {
-        text-align: center !important;
-    }
-    /* kolom 2 = TANGGAL kiri */
-    div[data-testid="stDataFrame"] td:nth-child(2) {
-        text-align: left !important;
-    }
-    </style>
-    """,
-    unsafe_allow_html=True,
-)
+
     # ---------------------- Tiket Detail (TABEL 1) ----------------------
     t_date_action = _find_col(tiket_df, ["Action Date", "Action"])
     if t_date_action is None:
