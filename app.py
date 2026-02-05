@@ -1079,6 +1079,136 @@ if go:
 
     st.success("Proses selesai. Hasil tersimpan (klik download tidak perlu proses ulang).")
 
+    # ======================================================================
+    # ==============  REKON PER ORDER ID (TIKET vs SETTLEMENT)  =============
+    # ======================================================================
+
+    def _norm_order_id(x) -> str:
+        s = "" if x is None else str(x)
+        s = s.strip().casefold()
+        s = re.sub(r"\s+", "", s)
+        s = re.sub(r"[^0-9a-z_]", "", s)  # buang simbol aneh (tetap keep underscore)
+        # Normalisasi go-show yang kadang "...ord" tanpa underscore
+        # contoh: "521...ord" -> "521..._ord"
+        if s.endswith("ord") and not s.endswith("_ord") and not s.startswith("ord"):
+            s = s[:-3] + "_ord"
+        return s
+
+    # --- cari kolom Order ID di tiket & settlement ---
+    t_order = _find_col(tiket_df, ["Order ID", "OrderId", "OrderID", "Order Number", "Order No", "order id"])
+    s_order2 = s_order  # dari blok DETAIL SETTLEMENT REPORT kamu (sudah dicari di atas)
+    if s_order2 is None:
+        s_order2 = _find_col(settle_df, ["Order ID", "OrderId", "OrderID", "Order Number", "Order No", "order id"])
+
+    if t_order is None or s_order2 is None:
+        st.warning("Tidak bisa buat Rekon per Order ID karena kolom Order ID tidak ditemukan di Tiket Detail / Settlement.")
+    else:
+        # --- TIKET: ambil hanya ESPAY + PAID + periode bulan ---
+        tix_oid = tiket_df.copy()
+        if t_created is not None:
+            tix_oid = _fill_action_from_created(tix_oid, t_date_action, t_created)
+
+        tix_oid[t_date_action] = pd.to_datetime(tix_oid[t_date_action].apply(_to_date), errors="coerce")
+        tix_oid = tix_oid[~tix_oid[t_date_action].isna()]
+        tix_oid = tix_oid[(tix_oid[t_date_action] >= month_start) & (tix_oid[t_date_action] <= month_end)]
+
+        tix_oid_bank = tix_oid[t_bank].apply(_norm_str)
+        tix_oid_stat = tix_oid[t_stat].apply(_norm_str)
+        tix_oid = tix_oid[tix_oid_bank.eq("espay") & tix_oid_stat.eq("paid")]
+
+        tix_oid[t_amt_tarif] = _to_num(tix_oid[t_amt_tarif])
+        tix_oid["__oid_key__"] = tix_oid[t_order].apply(_norm_order_id)
+
+        tiket_oid = (
+            tix_oid.groupby("__oid_key__", dropna=False)
+            .agg(
+                ORDER_ID_TIKET=(t_order, "first"),
+                TGL_TIKET=(t_date_action, "min"),
+                TIKET_TARIF=(t_amt_tarif, "sum"),
+            )
+            .reset_index()
+        )
+
+        # --- SETTLEMENT: filter periode bulan, agregasi per order id ---
+        sd_oid = settle_df.copy()
+
+        # pakai tanggal settlement yang tersedia (prioritas s_date_E, fallback s_date_legacy)
+        s_date_for_oid = s_date_E or s_date_legacy
+        s_amt_for_oid = s_amt_L or s_amt_legacy
+
+        if s_date_for_oid is None or s_amt_for_oid is None:
+            st.warning("Tidak bisa buat Rekon per Order ID karena kolom tanggal/amount Settlement tidak ditemukan.")
+        else:
+            sd_oid[s_date_for_oid] = pd.to_datetime(sd_oid[s_date_for_oid].apply(_to_date), errors="coerce")
+            sd_oid = sd_oid[~sd_oid[s_date_for_oid].isna()]
+            sd_oid = sd_oid[(sd_oid[s_date_for_oid] >= month_start) & (sd_oid[s_date_for_oid] <= month_end)]
+
+            sd_oid[s_amt_for_oid] = _to_num(sd_oid[s_amt_for_oid])
+            sd_oid["__oid_key__"] = sd_oid[s_order2].apply(_norm_order_id)
+
+            settle_oid = (
+                sd_oid.groupby("__oid_key__", dropna=False)
+                .agg(
+                    ORDER_ID_SETTLE=(s_order2, "first"),
+                    TGL_SETTLE=(s_date_for_oid, "min"),
+                    SETTLE_AMOUNT=(s_amt_for_oid, "sum"),
+                )
+                .reset_index()
+            )
+
+            # --- merge untuk rekonsiliasi ---
+            rekon_oid = tiket_oid.merge(settle_oid, on="__oid_key__", how="outer")
+
+            rekon_oid["TIKET_TARIF"] = rekon_oid["TIKET_TARIF"].fillna(0.0)
+            rekon_oid["SETTLE_AMOUNT"] = rekon_oid["SETTLE_AMOUNT"].fillna(0.0)
+            rekon_oid["SELISIH_TIKET_MINUS_SETTLE"] = rekon_oid["TIKET_TARIF"] - rekon_oid["SETTLE_AMOUNT"]
+
+            # status
+            has_t = rekon_oid["ORDER_ID_TIKET"].notna()
+            has_s = rekon_oid["ORDER_ID_SETTLE"].notna()
+
+            rekon_oid["STATUS"] = np.where(
+                has_t & ~has_s, "Only Ticket",
+                np.where(~has_t & has_s, "Only Settlement",
+                         np.where(rekon_oid["SELISIH_TIKET_MINUS_SETTLE"].abs() < 0.5, "Match", "Mismatch"))
+            )
+
+            # rapihin kolom
+            out_oid = rekon_oid[[
+                "STATUS",
+                "ORDER_ID_TIKET", "TGL_TIKET", "TIKET_TARIF",
+                "ORDER_ID_SETTLE", "TGL_SETTLE", "SETTLE_AMOUNT",
+                "SELISIH_TIKET_MINUS_SETTLE",
+            ]].copy()
+
+            # format tampil
+            out_view = out_oid.copy()
+            for c in ["TIKET_TARIF", "SETTLE_AMOUNT", "SELISIH_TIKET_MINUS_SETTLE"]:
+                out_view[c] = out_view[c].apply(_idr_fmt)
+
+            # tabel khusus: Only Ticket
+            only_ticket = out_oid[out_oid["STATUS"].eq("Only Ticket")].copy()
+            only_ticket_view = only_ticket.copy()
+            for c in ["TIKET_TARIF", "SETTLE_AMOUNT", "SELISIH_TIKET_MINUS_SETTLE"]:
+                only_ticket_view[c] = only_ticket_view[c].apply(_idr_fmt)
+
+            # simpan hasil ke session_state (biar tidak hilang setelah klik download)
+            st.session_state["HASIL"]["rekon_orderid"] = {
+                "periode": periode,
+                "table": out_view,
+                "table_raw": out_oid,
+                "only_ticket": only_ticket_view,
+                "only_ticket_raw": only_ticket,
+            }
+
+            # buat excel download
+            bio_oid = io.BytesIO()
+            with pd.ExcelWriter(bio_oid, engine="openpyxl") as xw_oid:
+                out_oid.to_excel(xw_oid, index=False, sheet_name="Rekon_OrderID_Raw")
+                out_view.to_excel(xw_oid, index=False, sheet_name="Rekon_OrderID_View")
+                only_ticket.to_excel(xw_oid, index=False, sheet_name="Only_Ticket_Raw")
+                only_ticket_view.to_excel(xw_oid, index=False, sheet_name="Only_Ticket_View")
+            st.session_state["HASIL"]["rekon_orderid"]["excel_bytes"] = bio_oid.getvalue()
 
 # =========================
 # RENDER HASIL TERSIMPAN
@@ -1117,6 +1247,22 @@ if "detail_settlement" in hasil:
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         use_container_width=True,
         key="dl_detail_settlement",
+    )
+if "rekon_orderid" in hasil:
+    st.subheader("Rekonsiliasi per Order ID — Tiket Detail ESPAY vs Settlement ESPAY")
+    st.caption(f"Periode tersimpan: {hasil['rekon_orderid']['periode']}")
+    st.dataframe(_style_right(hasil["rekon_orderid"]["table"]), use_container_width=True, hide_index=True)
+
+    st.subheader("Order ID Tiket Detail yang Tidak Ada di Settlement (Only Ticket)")
+    st.dataframe(_style_right(hasil["rekon_orderid"]["only_ticket"]), use_container_width=True, hide_index=True)
+
+    st.download_button(
+        "Unduh Excel Rekon Order ID",
+        data=hasil["rekon_orderid"]["excel_bytes"],
+        file_name=f"rekon_orderid_{hasil['rekon_orderid']['periode']}.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        use_container_width=True,
+        key="dl_rekon_orderid",
     )
 
 if not hasil:
