@@ -66,9 +66,10 @@ def _norm_str(val) -> str:
 def _is_bca_va_product(prod_val) -> bool:
     """Return True for BCA Virtual Account products, including 'blu BCA'."""
     s = _norm_str(prod_val)
-    if s in {"bca va online", "blu bca va online", "blu bca"}:
+    if s in {"bca va online", "blu bca va online", "blu bca", "blu bca online"}:
         return True
-    return ("va" in s) and ("bca" in s)
+    # Treat "blu BCA Online" as BCA VA even if the word "VA" is absent.
+    return ("bca" in s) and (("va" in s) or ("virtual account" in s) or ("blu bca online" in s))
 
 
 def _norm_bank(val) -> str:
@@ -933,8 +934,8 @@ if go:
         go_show_mask = order_norm.str.endswith("_ord") | (~order_norm.str.startswith("ord") & order_norm.str.endswith("ord"))
         online_mask = order_norm.str.startswith("ord")
 
-        has_va = prod_norm.str.contains("va", na=False)
         is_bca_va = prod_raw.apply(_is_bca_va_product)
+        has_va = prod_norm.str.contains("va", na=False) | is_bca_va
         non_bca_va = has_va & ~is_bca_va
         is_emoney = ~has_va
 
