@@ -110,6 +110,13 @@ def _to_date(val) -> Optional[pd.Timestamp]:
 
 
 def _fill_action_from_created(df: pd.DataFrame, action_col: str, created_col: str) -> pd.DataFrame:
+    """Isi kolom Action dari kolom Created jika Action kosong.
+
+    Output Action dibuat dd/mm/yyyy supaya parsing tanggal konsisten.
+    Robust untuk Created yang bisa berupa:
+    - yyyy-mm-dd hh:mm:ss
+    - dd/mm/yyyy hh:mm:ss
+    """
     if df is None or df.empty or not action_col or not created_col:
         return df
 
@@ -405,21 +412,12 @@ def _month_selector() -> Tuple[int, int]:
     return year, month
 
 
-def _norm_order_id(x) -> str:
-    s = "" if x is None else str(x)
-    s = s.strip().casefold()
-    s = re.sub(r"\s+", "", s)
-    s = re.sub(r"[^0-9a-z_]", "", s)
-    if s.endswith("ord") and not s.endswith("_ord") and not s.startswith("ord"):
-        s = s[:-3] + "_ord"
-    return s
-
-
 # ---------- App ----------
 
 st.set_page_config(page_title="Rekonsiliasi Tiket vs Settlement", layout="wide")
 st.title("Rekonsiliasi: Tiket Detail vs Settlement Dana")
 
+# --- FORCE ALIGNMENT: angka kanan, NO center, TANGGAL kiri (UI Streamlit) ---
 st.markdown(
     """
     <style>
@@ -668,9 +666,6 @@ if go:
             continue
         fmt[c] = fmt[c].apply(_idr_fmt)
 
-    # =========================
-    # EXPORT EXCEL REKON
-    # =========================
     from openpyxl.styles import Alignment, Font
 
     bio = io.BytesIO()
@@ -788,7 +783,7 @@ if go:
         m_varetail_all = sub_norm_all.str.contains(r"virtual\s*account", na=False) & sub_norm_all.str.contains(r"gerai|retail", na=False)
         m_cash_all = (sub_norm_all == "cash") | sub_norm_all.str.contains(r"\bcash\b", na=False)
 
-        # TRANSFER (kolom J mengandung "transfer")
+        # TAMBAHAN: TRANSFER (kolom J mengandung "transfer")
         m_tf_all = sub_norm_all.str.contains(r"\btransfer\b", na=False)
 
         idx2 = pd.Index(pd.date_range(month_start, month_end, freq="D").date, name="Tanggal")
@@ -803,6 +798,7 @@ if go:
         s_gs_cash_asdp = tix.loc[m_go_show & m_cash_all & bank_norm_all.eq("asdp")].groupby(tix[date_col].dt.date, dropna=True)[tarif_col].sum()
 
         # ---------------- GO SHOW TRANSFER (BARU) ----------------
+        # PT.POS variasi: "pt.pos", "pt pos", "ptpos", "pos"
         m_bank_ptpos = bank_norm_all.str.contains(r"\b(pt\.?\s*pos|ptpos|pos)\b", na=False)
 
         s_gs_tf_ptpos = tix.loc[m_go_show & m_tf_all & m_bank_ptpos].groupby(tix[date_col].dt.date, dropna=True)[tarif_col].sum()
@@ -890,8 +886,180 @@ if go:
         df2_fmt_mi.columns = pd.MultiIndex.from_tuples(top)
 
     # ======================================================================
-    # ===================  SUMMARY SELISIH (ORDER ID)  =====================
+    # ===================  TABEL: DETAIL SETTLEMENT REPORT  =================
     # ======================================================================
+
+    detail_settle_table = None
+    detail_settle_excel_bytes = None
+
+    s_order = _find_col(settle_df, ["Order ID", "OrderId", "Order Number", "Order No", "OrderID", "order id"])
+    miss = [n for n, c in [
+        ("Settlement Date (E)", s_date_E),
+        ("Settlement Amount (L)", s_amt_L),
+        ("Product Name (P)", s_prod_P),
+        ("Order ID", s_order),
+    ] if c is None]
+
+    if miss:
+        st.warning("Kolom untuk 'DETAIL SETTLEMENT REPORT' belum lengkap: " + ", ".join(miss))
+    else:
+        sd = settle_df.copy()
+        sd[s_date_E] = sd[s_date_E].apply(_to_date)
+        sd = sd[~sd[s_date_E].isna()]
+        sd = sd[(sd[s_date_E] >= month_start) & (sd[s_date_E] <= month_end)]
+
+        sd[s_amt_L] = _to_num(sd[s_amt_L])
+        prod_norm = sd[s_prod_P].astype(str).str.strip().str.casefold()
+        order_norm = sd[s_order].astype(str).str.strip().str.casefold()
+
+        go_show_mask = order_norm.str.endswith("_ord") | (~order_norm.str.startswith("ord") & order_norm.str.endswith("ord"))
+        online_mask = order_norm.str.startswith("ord")
+
+        has_va = prod_norm.str.contains("va", na=False)
+        is_bca_va = prod_norm.eq("bca va online")
+        non_bca_va = has_va & ~is_bca_va
+        is_emoney = ~has_va
+
+        gs_va_bca = sd.loc[go_show_mask & is_bca_va].groupby(sd[s_date_E].dt.date, dropna=True)[s_amt_L].sum()
+        gs_va_nonbca = sd.loc[go_show_mask & non_bca_va].groupby(sd[s_date_E].dt.date, dropna=True)[s_amt_L].sum()
+        gs_emoney = sd.loc[go_show_mask & is_emoney].groupby(sd[s_date_E].dt.date, dropna=True)[s_amt_L].sum()
+
+        on_va_bca = sd.loc[online_mask & is_bca_va].groupby(sd[s_date_E].dt.date, dropna=True)[s_amt_L].sum()
+        on_va_nonbca = sd.loc[online_mask & non_bca_va].groupby(sd[s_date_E].dt.date, dropna=True)[s_amt_L].sum()
+        on_emoney = sd.loc[online_mask & is_emoney].groupby(sd[s_date_E].dt.date, dropna=True)[s_amt_L].sum()
+
+        idx_set = pd.Index(pd.date_range(month_start, month_end, freq="D").date, name="Tanggal")
+        detail_settle = pd.DataFrame(index=idx_set)
+
+        detail_settle["GS|VIRTUAL ACCOUNT - BCA"] = gs_va_bca.reindex(idx_set, fill_value=0.0).values
+        detail_settle["GS|VIRTUAL ACCOUNT - NON BCA"] = gs_va_nonbca.reindex(idx_set, fill_value=0.0).values
+        detail_settle["GS|E-MONEY"] = gs_emoney.reindex(idx_set, fill_value=0.0).values
+
+        detail_settle["ON|VIRTUAL ACCOUNT - BCA"] = on_va_bca.reindex(idx_set, fill_value=0.0).values
+        detail_settle["ON|VIRTUAL ACCOUNT - NON BCA"] = on_va_nonbca.reindex(idx_set, fill_value=0.0).values
+        detail_settle["ON|E-MONEY"] = on_emoney.reindex(idx_set, fill_value=0.0).values
+
+        detail_settle["GS|Total Settlement (Go Show)"] = (
+            detail_settle["GS|VIRTUAL ACCOUNT - BCA"]
+            + detail_settle["GS|VIRTUAL ACCOUNT - NON BCA"]
+            + detail_settle["GS|E-MONEY"]
+        )
+        detail_settle["ON|Total Settlement (Online)"] = (
+            detail_settle["ON|VIRTUAL ACCOUNT - BCA"]
+            + detail_settle["ON|VIRTUAL ACCOUNT - NON BCA"]
+            + detail_settle["ON|E-MONEY"]
+        )
+
+        detail_settle = detail_settle[
+            [
+                "GS|VIRTUAL ACCOUNT - BCA",
+                "GS|VIRTUAL ACCOUNT - NON BCA",
+                "GS|E-MONEY",
+                "GS|Total Settlement (Go Show)",
+                "ON|VIRTUAL ACCOUNT - BCA",
+                "ON|VIRTUAL ACCOUNT - NON BCA",
+                "ON|E-MONEY",
+                "ON|Total Settlement (Online)",
+            ]
+        ]
+
+        df3 = detail_settle.reset_index()
+        df3.insert(0, "NO", range(1, len(df3) + 1))
+
+        total_row3 = {"NO": "", "Tanggal": "TOTAL"}
+        for k in detail_settle.columns:
+            total_row3[k] = float(detail_settle[k].sum())
+        df3 = pd.concat([df3, pd.DataFrame([total_row3])], ignore_index=True)
+
+        df3_fmt = df3.copy()
+        for c in df3_fmt.columns:
+            if c in ("NO", "Tanggal"):
+                continue
+            df3_fmt[c] = df3_fmt[c].apply(_idr_fmt)
+
+        def _split_head(col_name: str) -> tuple[str, str]:
+            if col_name.startswith("GS|"):
+                return ("GO SHOW", col_name[3:])
+            if col_name.startswith("ON|"):
+                return ("ONLINE", col_name[3:])
+            return ("", col_name)
+
+        ordered = list(detail_settle.columns)
+        df3_fmt = df3_fmt[["NO", "Tanggal"] + ordered]
+        top3 = [("", "NO"), ("", "Tanggal")] + [_split_head(k) for k in ordered]
+        df3_fmt_mi = df3_fmt.copy()
+        df3_fmt_mi.columns = pd.MultiIndex.from_tuples(top3)
+        detail_settle_table = df3_fmt_mi
+
+        from openpyxl.styles import Alignment, Font
+        from openpyxl.utils import get_column_letter
+
+        bio_settle = io.BytesIO()
+        with pd.ExcelWriter(bio_settle, engine="openpyxl") as xw3:
+            df3.to_excel(xw3, index=False, sheet_name="Detail_Settlement")
+
+            wsname3 = "Detail_Settlement_View"
+            df3_fmt.to_excel(xw3, index=False, header=False, sheet_name=wsname3, startrow=2)
+            wb3 = xw3.book
+            ws3 = wb3[wsname3]
+
+            cols3 = list(df3.columns)
+            top_headers = []
+            sub_headers = []
+            for c in cols3:
+                if c in ("NO", "Tanggal"):
+                    top_headers.append("")
+                    sub_headers.append(c)
+                elif str(c).startswith("GS|"):
+                    top_headers.append("GO SHOW")
+                    sub_headers.append(str(c)[3:])
+                elif str(c).startswith("ON|"):
+                    top_headers.append("ONLINE")
+                    sub_headers.append(str(c)[3:])
+                else:
+                    top_headers.append("")
+                    sub_headers.append(str(c))
+
+            for j, (top, sub) in enumerate(zip(top_headers, sub_headers), start=1):
+                ws3.cell(row=1, column=j, value=top)
+                ws3.cell(row=2, column=j, value=sub)
+
+            def _merge_same_run(labels, row_idx):
+                start = 0
+                while start < len(labels):
+                    end = start
+                    while end + 1 < len(labels) and labels[end + 1] == labels[start]:
+                        end += 1
+                    label = labels[start]
+                    if label not in ("", None) and end >= start:
+                        ws3.merge_cells(start_row=row_idx, start_column=start + 1, end_row=row_idx, end_column=end + 1)
+                    start = end + 1
+
+            _merge_same_run(top_headers, row_idx=1)
+
+            for j, top in enumerate(top_headers, start=1):
+                if top == "":
+                    ws3.merge_cells(start_row=1, start_column=j, end_row=2, end_column=j)
+
+            max_col = len(cols3)
+            for ccol in range(1, max_col + 1):
+                ws3.cell(row=1, column=ccol).font = Font(bold=True)
+                ws3.cell(row=2, column=ccol).font = Font(bold=True)
+                ws3.cell(row=1, column=ccol).alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+                ws3.cell(row=2, column=ccol).alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+            ws3.row_dimensions[1].height = 22
+            ws3.row_dimensions[2].height = 22
+
+            sample_rows = min(50, df3_fmt.shape[0])
+            for idx_col, col_name in enumerate(cols3, start=1):
+                max_len = max(len(str(col_name)), len(str(sub_headers[idx_col - 1])), len(str(top_headers[idx_col - 1])))
+                for r in range(3, 3 + sample_rows):
+                    v = ws3.cell(row=r, column=idx_col).value
+                    if v is not None:
+                        max_len = max(max_len, len(str(v)))
+                ws3.column_dimensions[get_column_letter(idx_col)].width = min(max(10, max_len + 2), 45)
+
+        detail_settle_excel_bytes = bio_settle.getvalue()
 
     periode = f"{y}-{m:02d}"
     st.session_state["HASIL"]["rekon"] = {"periode": periode, "table": fmt, "excel_bytes": bio.getvalue()}
@@ -900,80 +1068,14 @@ if go:
     else:
         st.session_state["HASIL"].pop("detail_tiket", None)
 
-    # SUMMARY: cari Only Ticket vs Settlement berdasarkan Order ID (tanpa tampil tabel besar)
-    t_order = _find_col(tiket_df, ["Order ID", "OrderId", "OrderID", "Order Number", "Order No", "order id"])
-    s_order = _find_col(settle_df, ["Order ID", "OrderId", "OrderID", "Order Number", "Order No", "order id"])
-
-    s_date_for_oid = s_date_E or s_date_legacy
-    s_amt_for_oid = s_amt_L or s_amt_legacy
-
-    if t_order and s_order and s_date_for_oid and s_amt_for_oid:
-        # Tiket ESPAY paid dalam periode
-        tix_oid = tiket_df.copy()
-        if t_created is not None:
-            tix_oid = _fill_action_from_created(tix_oid, t_date_action, t_created)
-        tix_oid[t_date_action] = pd.to_datetime(tix_oid[t_date_action].apply(_to_date), errors="coerce")
-        tix_oid = tix_oid[~tix_oid[t_date_action].isna()]
-        tix_oid = tix_oid[(tix_oid[t_date_action] >= month_start) & (tix_oid[t_date_action] <= month_end)]
-        tix_oid = tix_oid[tix_oid[t_bank].apply(_norm_str).eq("espay") & tix_oid[t_stat].apply(_norm_str).eq("paid")]
-        tix_oid[t_amt_tarif] = _to_num(tix_oid[t_amt_tarif])
-        tix_oid["__oid_key__"] = tix_oid[t_order].apply(_norm_order_id)
-
-        tiket_oid = tix_oid.groupby("__oid_key__", dropna=False).agg(
-            TIKET_TARIF=(t_amt_tarif, "sum"),
-        ).reset_index()
-
-        # Settlement dalam periode
-        sd_oid = settle_df.copy()
-        sd_oid[s_date_for_oid] = pd.to_datetime(sd_oid[s_date_for_oid].apply(_to_date), errors="coerce")
-        sd_oid = sd_oid[~sd_oid[s_date_for_oid].isna()]
-        sd_oid = sd_oid[(sd_oid[s_date_for_oid] >= month_start) & (sd_oid[s_date_for_oid] <= month_end)]
-        sd_oid[s_amt_for_oid] = _to_num(sd_oid[s_amt_for_oid])
-        sd_oid["__oid_key__"] = sd_oid[s_order].apply(_norm_order_id)
-
-        settle_oid = sd_oid.groupby("__oid_key__", dropna=False).agg(
-            SETTLE_AMOUNT=(s_amt_for_oid, "sum"),
-        ).reset_index()
-
-        rekon_oid = tiket_oid.merge(settle_oid, on="__oid_key__", how="outer")
-        rekon_oid["TIKET_TARIF"] = rekon_oid["TIKET_TARIF"].fillna(0.0)
-        rekon_oid["SETTLE_AMOUNT"] = rekon_oid["SETTLE_AMOUNT"].fillna(0.0)
-        rekon_oid["SELISIH"] = rekon_oid["TIKET_TARIF"] - rekon_oid["SETTLE_AMOUNT"]
-
-        has_t = rekon_oid["TIKET_TARIF"].abs() > 0
-        has_s = rekon_oid["SETTLE_AMOUNT"].abs() > 0
-
-        status = np.where(
-            has_t & ~has_s, "Only Ticket",
-            np.where(~has_t & has_s, "Only Settlement",
-                     np.where(rekon_oid["SELISIH"].abs() < 0.5, "Match", "Mismatch"))
-        )
-        rekon_oid["STATUS"] = status
-
-        summary_selisih = {
-            "TOTAL TIKET (ESPAY)": float(rekon_oid["TIKET_TARIF"].sum()),
-            "TOTAL SETTLEMENT (ESPAY)": float(rekon_oid["SETTLE_AMOUNT"].sum()),
-            "SELISIH TOTAL (TIKET - SETTLEMENT)": float(rekon_oid["SELISIH"].sum()),
-            "ABS SELISIH TOTAL": float(rekon_oid["SELISIH"].abs().sum()),
-            "ONLY TICKET (COUNT)": int((rekon_oid["STATUS"] == "Only Ticket").sum()),
-            "ONLY TICKET (NOMINAL)": float(rekon_oid.loc[rekon_oid["STATUS"] == "Only Ticket", "TIKET_TARIF"].sum()),
-            "ONLY SETTLEMENT (COUNT)": int((rekon_oid["STATUS"] == "Only Settlement").sum()),
-            "ONLY SETTLEMENT (NOMINAL)": float(rekon_oid.loc[rekon_oid["STATUS"] == "Only Settlement", "SETTLE_AMOUNT"].sum()),
-            "MISMATCH (COUNT)": int((rekon_oid["STATUS"] == "Mismatch").sum()),
-            "MISMATCH (ABS NOMINAL)": float(rekon_oid.loc[rekon_oid["STATUS"] == "Mismatch", "SELISIH"].abs().sum()),
-        }
-
-        bio_sum = io.BytesIO()
-        with pd.ExcelWriter(bio_sum, engine="openpyxl") as xw_sum:
-            pd.DataFrame([summary_selisih]).to_excel(xw_sum, index=False, sheet_name="Summary")
-
-        st.session_state["HASIL"]["summary_selisih"] = {
+    if detail_settle_table is not None and detail_settle_excel_bytes is not None:
+        st.session_state["HASIL"]["detail_settlement"] = {
             "periode": periode,
-            "summary": summary_selisih,
-            "excel_bytes": bio_sum.getvalue(),
+            "table": detail_settle_table,
+            "excel_bytes": detail_settle_excel_bytes,
         }
     else:
-        st.session_state["HASIL"].pop("summary_selisih", None)
+        st.session_state["HASIL"].pop("detail_settlement", None)
 
     st.success("Proses selesai. Hasil tersimpan (klik download tidak perlu proses ulang).")
 
@@ -1003,34 +1105,18 @@ if "detail_tiket" in hasil:
     st.caption(f"Periode tersimpan: {hasil['detail_tiket']['periode']}")
     st.dataframe(_style_right(hasil["detail_tiket"]["table"]), use_container_width=True, hide_index=True)
 
-if "summary_selisih" in hasil:
-    st.subheader("Summary Selisih Tiket Detail ESPAY vs Settlement ESPAY (berdasarkan Order ID)")
-    st.caption(f"Periode tersimpan: {hasil['summary_selisih']['periode']}")
-
-    s = hasil["summary_selisih"]["summary"]
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("TOTAL TIKET (ESPAY)", _idr_fmt(s["TOTAL TIKET (ESPAY)"]))
-    c2.metric("TOTAL SETTLEMENT (ESPAY)", _idr_fmt(s["TOTAL SETTLEMENT (ESPAY)"]))
-    c3.metric("SELISIH TOTAL (TIKET - SETTLEMENT)", _idr_fmt(s["SELISIH TOTAL (TIKET - SETTLEMENT)"]))
-    c4.metric("ABS SELISIH TOTAL", _idr_fmt(s["ABS SELISIH TOTAL"]))
-
-    st.markdown("### Ringkasan Status Order ID")
-    st.write({
-        "ONLY TICKET (COUNT)": s["ONLY TICKET (COUNT)"],
-        "ONLY TICKET (NOMINAL)": _idr_fmt(s["ONLY TICKET (NOMINAL)"]),
-        "ONLY SETTLEMENT (COUNT)": s["ONLY SETTLEMENT (COUNT)"],
-        "ONLY SETTLEMENT (NOMINAL)": _idr_fmt(s["ONLY SETTLEMENT (NOMINAL)"]),
-        "MISMATCH (COUNT)": s["MISMATCH (COUNT)"],
-        "MISMATCH (ABS NOMINAL)": _idr_fmt(s["MISMATCH (ABS NOMINAL)"]),
-    })
+if "detail_settlement" in hasil:
+    st.subheader("DETAIL SETTLEMENT REPORT")
+    st.caption(f"Periode tersimpan: {hasil['detail_settlement']['periode']}")
+    st.dataframe(_style_right(hasil["detail_settlement"]["table"]), use_container_width=True, hide_index=True)
 
     st.download_button(
-        "Unduh Excel Summary Selisih",
-        data=hasil["summary_selisih"]["excel_bytes"],
-        file_name=f"summary_selisih_{hasil['summary_selisih']['periode']}.xlsx",
+        "Unduh Excel (Detail Settlement)",
+        data=hasil["detail_settlement"]["excel_bytes"],
+        file_name=f"detail_settlement_{hasil['detail_settlement']['periode']}.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         use_container_width=True,
-        key="dl_summary_selisih",
+        key="dl_detail_settlement",
     )
 
 if not hasil:
