@@ -64,12 +64,34 @@ def _norm_str(val) -> str:
 
 
 def _is_bca_va_product(prod_val) -> bool:
-    """Return True for BCA Virtual Account products, including 'blu BCA'."""
+    """Return True for BCA Virtual Account products (incl. blu variants).
+
+    Business rules:
+    - Any product that clearly indicates BCA VA (contains 'va'/'virtual account' and 'bca') is BCA VA.
+    - blu-branded BCA products that may not include the string 'VA' (e.g. 'blu BCA Online',
+      'blu by BCA Digital') are also treated as BCA VA.
+    """
     s = _norm_str(prod_val)
-    if s in {"bca va online", "blu bca va online", "blu bca", "blu bca online"}:
+
+    # Exact/near-exact known labels found in settlement reports.
+    if s in {
+        "bca va online",
+        "blu bca va online",
+        "blu bca",
+        "blu bca online",
+        "blu by bca digital",
+        "blu by bca",
+    }:
         return True
-    # Treat "blu BCA Online" as BCA VA even if the word "VA" is absent.
-    return ("bca" in s) and (("va" in s) or ("virtual account" in s) or ("blu bca online" in s))
+
+    # General signals.
+    has_bca = "bca" in s
+    has_va = ("va" in s) or ("virtual account" in s)
+
+    # blu + bca is treated as BCA VA even if 'VA' text is missing.
+    has_blu_bca = ("blu" in s) and has_bca
+
+    return has_bca and (has_va or has_blu_bca)
 
 
 def _norm_bank(val) -> str:
