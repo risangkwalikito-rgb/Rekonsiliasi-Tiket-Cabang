@@ -62,6 +62,23 @@ def _norm_str(val) -> str:
     return s.strip().lower()
 
 
+
+def _is_bca_va_product(prod_val) -> bool:
+    """Return True for BCA Virtual Account products, including 'blu BCA'."""
+    s = _norm_str(prod_val)
+    if s in {"bca va online", "blu bca va online", "blu bca"}:
+        return True
+    return ("va" in s) and ("bca" in s)
+
+
+def _norm_bank(val) -> str:
+    """Normalize bank names; treat 'blu BCA' as 'bca'."""
+    s = _norm_str(val)
+    if "bca" in s:
+        return "bca"
+    return s
+
+
 _ddmmyyyy = re.compile(r"\b(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{2,4})\b")
 
 
@@ -567,8 +584,8 @@ if go:
         sd_bca = sd_bca[~sd_bca[s_date_E].isna()]
         sd_bca = sd_bca[(sd_bca[s_date_E] >= month_start) & (sd_bca[s_date_E] <= month_end)]
         sd_bca[s_amt_L] = _to_num(sd_bca[s_amt_L])
-        prod_norm = sd_bca[s_prod_P].astype(str).str.strip().str.casefold()
-        bca_mask = prod_norm.eq("bca va online".casefold())
+        prod_norm = sd_bca[s_prod_P]
+        bca_mask = prod_norm.apply(_is_bca_va_product)
         settle_by_date_bca = sd_bca.loc[bca_mask].groupby(sd_bca[s_date_E].dt.date, dropna=True)[s_amt_L].sum()
         settle_by_date_non_bca = sd_bca.loc[~bca_mask].groupby(sd_bca[s_date_E].dt.date, dropna=True)[s_amt_L].sum()
         bca_series = settle_by_date_bca
@@ -771,7 +788,7 @@ if go:
 
         main_norm_all = tix[type_main_col].apply(_norm_str)
         sub_norm_all = tix[type_sub_col].apply(_norm_str)
-        bank_norm_all = tix[bank_col].apply(_norm_str)
+        bank_norm_all = tix[bank_col].apply(_norm_bank)
 
         tix[tarif_col] = _to_num(tix[tarif_col])
 
@@ -909,14 +926,15 @@ if go:
         sd = sd[(sd[s_date_E] >= month_start) & (sd[s_date_E] <= month_end)]
 
         sd[s_amt_L] = _to_num(sd[s_amt_L])
-        prod_norm = sd[s_prod_P].astype(str).str.strip().str.casefold()
+        prod_raw = sd[s_prod_P]
+        prod_norm = prod_raw.astype(str).str.strip().str.casefold()
         order_norm = sd[s_order].astype(str).str.strip().str.casefold()
 
         go_show_mask = order_norm.str.endswith("_ord") | (~order_norm.str.startswith("ord") & order_norm.str.endswith("ord"))
         online_mask = order_norm.str.startswith("ord")
 
         has_va = prod_norm.str.contains("va", na=False)
-        is_bca_va = prod_norm.eq("bca va online")
+        is_bca_va = prod_raw.apply(_is_bca_va_product)
         non_bca_va = has_va & ~is_bca_va
         is_emoney = ~has_va
 
