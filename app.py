@@ -1160,7 +1160,7 @@ if go:
         td_gap = td_gap[(td_gap[t_date_action] >= month_start) & (td_gap[t_date_action] <= month_end)]
 
         bank_mask = td_gap[t_bank].apply(_norm_str).str.contains("espay", na=False)
-        paid_mask = td_gap[t_stat].apply(_norm_str).str.contains("paid", na=False)
+        paid_mask = td_gap[t_stat].apply(_norm_str).eq("paid")
         td_gap = td_gap[bank_mask & paid_mask].copy()
 
         td_gap[t_amt_tarif] = _to_num(td_gap[t_amt_tarif])
