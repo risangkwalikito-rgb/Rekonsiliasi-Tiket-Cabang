@@ -102,6 +102,28 @@ def _norm_bank(val) -> str:
     return s
 
 
+def _norm_order_id(val) -> str:
+    if val is None or (isinstance(val, float) and np.isnan(val)):
+        return ""
+    s = str(val).strip()
+    if not s or s.lower() in {"nan", "none", "null"}:
+        return ""
+    s = re.sub(r"\s+", "", s)
+    if re.fullmatch(r"\d+\.0+", s):
+        s = s.split(".", 1)[0]
+    return s.casefold()
+
+
+def _first_nonempty_text(sr: pd.Series) -> str:
+    for v in sr:
+        if pd.isna(v):
+            continue
+        s = str(v).strip()
+        if s and s.lower() not in {"nan", "none", "null"}:
+            return s
+    return ""
+
+
 _ddmmyyyy = re.compile(r"\b(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{2,4})\b")
 
 
@@ -294,25 +316,26 @@ def _style_right(df: pd.DataFrame):
 
     cols = list(df.columns)
 
-    def _is_no(col):
-        return (isinstance(col, tuple) and str(col[-1]) == "NO") or (not isinstance(col, tuple) and str(col) == "NO")
+    def _last_label(col):
+        return str(col[-1]) if isinstance(col, tuple) else str(col)
 
-    def _is_tgl(col):
-        return (isinstance(col, tuple) and str(col[-1]) in ("TANGGAL", "Tanggal")) or (
-            not isinstance(col, tuple) and str(col) in ("TANGGAL", "Tanggal")
-        )
+    def _is_no(col):
+        return _last_label(col) == "NO"
+
+    def _is_left(col):
+        return _last_label(col) in ("TANGGAL", "Tanggal", "ORDER ID", "Order ID", "STATUS", "Status")
 
     no_cols = [c for c in cols if _is_no(c)]
-    tgl_cols = [c for c in cols if _is_tgl(c)]
-    right_cols = [c for c in cols if c not in set(no_cols + tgl_cols)]
+    left_cols = [c for c in cols if _is_left(c)]
+    right_cols = [c for c in cols if c not in set(no_cols + left_cols)]
 
     sty = df.style
     sty = sty.set_table_styles([{"selector": "th", "props": [("text-align", "center")]}])
 
     if no_cols:
         sty = sty.set_properties(subset=no_cols, **{"text-align": "center"})
-    if tgl_cols:
-        sty = sty.set_properties(subset=tgl_cols, **{"text-align": "left"})
+    if left_cols:
+        sty = sty.set_properties(subset=left_cols, **{"text-align": "left"})
     if right_cols:
         sty = sty.set_properties(subset=right_cols, **{"text-align": "right"})
 
@@ -1102,6 +1125,120 @@ if go:
 
         detail_settle_excel_bytes = bio_settle.getvalue()
 
+
+    # ======================================================================
+    # ========================  RINCIAN SELISIH ORDER ID  ===================
+    # ======================================================================
+
+    rincian_selisih_table = None
+    rincian_selisih_excel_bytes = None
+
+    t_order = _find_col(tiket_df, ["Order ID", "OrderId", "Order No", "Order Number", "OrderID"])
+    s_order_rincian = _find_col(settle_df, ["Order ID", "OrderId", "Order Number", "Order No", "OrderID", "order id"])
+    s_date_transaction = _find_col(settle_df, ["Transaction Date", "Tanggal Transaksi"])
+
+    miss_rincian = [n for n, c in [
+        ("Order ID Tiket Detail", t_order),
+        ("Action Date / Action", t_date_action),
+        ("Bank", t_bank),
+        ("Tarif", t_amt_tarif),
+        ("Order ID Settlement Dana", s_order_rincian),
+        ("Transaction Date", s_date_transaction),
+        ("Settlement Amount", s_amt_legacy),
+    ] if c is None]
+
+    if miss_rincian:
+        st.warning("Kolom untuk 'RINCIAN SELISIH' belum lengkap: " + ", ".join(miss_rincian))
+    else:
+        td_gap = tiket_df.copy()
+        if t_created is not None:
+            td_gap = _fill_action_from_created(td_gap, t_date_action, t_created)
+
+        td_gap[t_date_action] = pd.to_datetime(td_gap[t_date_action].apply(_to_date), errors="coerce")
+        td_gap = td_gap[~td_gap[t_date_action].isna()]
+        td_gap = td_gap[(td_gap[t_date_action] >= month_start) & (td_gap[t_date_action] <= month_end)]
+
+        bank_mask = td_gap[t_bank].apply(_norm_str).str.contains("espay", na=False)
+        td_gap = td_gap[bank_mask].copy()
+
+        td_gap[t_amt_tarif] = _to_num(td_gap[t_amt_tarif])
+        td_gap["__order_key__"] = td_gap[t_order].apply(_norm_order_id)
+        td_gap["__order_display__"] = td_gap[t_order].apply(lambda x: "" if pd.isna(x) else str(x).strip())
+        td_gap = td_gap[td_gap["__order_key__"].ne("")]
+
+        tiket_order_cmp = td_gap.groupby("__order_key__", as_index=False).agg(
+            ORDER_ID_TIKET=("__order_display__", _first_nonempty_text),
+            TARIF_TIKET_DETAIL=(t_amt_tarif, "sum"),
+        )
+
+        sd_gap = settle_df.copy()
+        sd_gap[s_date_transaction] = pd.to_datetime(sd_gap[s_date_transaction].apply(_to_date), errors="coerce")
+        sd_gap = sd_gap[~sd_gap[s_date_transaction].isna()]
+        sd_gap = sd_gap[(sd_gap[s_date_transaction] >= month_start) & (sd_gap[s_date_transaction] <= month_end)]
+
+        sd_gap[s_amt_legacy] = _to_num(sd_gap[s_amt_legacy])
+        sd_gap["__order_key__"] = sd_gap[s_order_rincian].apply(_norm_order_id)
+        sd_gap["__order_display__"] = sd_gap[s_order_rincian].apply(lambda x: "" if pd.isna(x) else str(x).strip())
+        sd_gap = sd_gap[sd_gap["__order_key__"].ne("")]
+
+        settle_order_cmp = sd_gap.groupby("__order_key__", as_index=False).agg(
+            ORDER_ID_SETTLEMENT=("__order_display__", _first_nonempty_text),
+            SETTLEMENT_AMOUNT=(s_amt_legacy, "sum"),
+        )
+
+        rincian_cmp = tiket_order_cmp.merge(settle_order_cmp, on="__order_key__", how="outer")
+        rincian_cmp["ORDER ID"] = rincian_cmp["ORDER_ID_TIKET"].fillna(rincian_cmp["ORDER_ID_SETTLEMENT"])
+        rincian_cmp["TARIF TIKET DETAIL"] = rincian_cmp["TARIF_TIKET_DETAIL"].fillna(0.0)
+        rincian_cmp["SETTLEMENT AMOUNT"] = rincian_cmp["SETTLEMENT_AMOUNT"].fillna(0.0)
+        rincian_cmp["SELISIH"] = rincian_cmp["TARIF TIKET DETAIL"] - rincian_cmp["SETTLEMENT AMOUNT"]
+
+        rincian_cmp["STATUS"] = np.select(
+            [
+                rincian_cmp["TARIF TIKET DETAIL"].eq(0) & rincian_cmp["SETTLEMENT AMOUNT"].ne(0),
+                rincian_cmp["TARIF TIKET DETAIL"].ne(0) & rincian_cmp["SETTLEMENT AMOUNT"].eq(0),
+                rincian_cmp["SELISIH"].eq(0),
+            ],
+            [
+                "HANYA DI SETTLEMENT",
+                "HANYA DI TIKET",
+                "MATCH",
+            ],
+            default="SELISIH NOMINAL",
+        )
+
+        rincian_cmp = rincian_cmp[
+            ["ORDER ID", "TARIF TIKET DETAIL", "SETTLEMENT AMOUNT", "SELISIH", "STATUS"]
+        ]
+
+        rincian_cmp = rincian_cmp[rincian_cmp["SELISIH"].ne(0)].copy()
+        rincian_cmp["__abs__"] = rincian_cmp["SELISIH"].abs()
+        rincian_cmp = rincian_cmp.sort_values(["__abs__", "ORDER ID"], ascending=[False, True], kind="stable")
+        rincian_cmp = rincian_cmp.drop(columns="__abs__").reset_index(drop=True)
+        rincian_cmp.insert(0, "NO", range(1, len(rincian_cmp) + 1))
+
+        total_row_gap = pd.DataFrame([{
+            "NO": "",
+            "ORDER ID": "TOTAL",
+            "TARIF TIKET DETAIL": rincian_cmp["TARIF TIKET DETAIL"].sum() if not rincian_cmp.empty else 0.0,
+            "SETTLEMENT AMOUNT": rincian_cmp["SETTLEMENT AMOUNT"].sum() if not rincian_cmp.empty else 0.0,
+            "SELISIH": rincian_cmp["SELISIH"].sum() if not rincian_cmp.empty else 0.0,
+            "STATUS": "",
+        }])
+
+        rincian_view = pd.concat([rincian_cmp, total_row_gap], ignore_index=True)
+
+        rincian_fmt = rincian_view.copy()
+        for c in ["TARIF TIKET DETAIL", "SETTLEMENT AMOUNT", "SELISIH"]:
+            rincian_fmt[c] = rincian_fmt[c].apply(_idr_fmt)
+
+        bio_gap = io.BytesIO()
+        with pd.ExcelWriter(bio_gap, engine="openpyxl") as xw_gap:
+            rincian_view.to_excel(xw_gap, index=False, sheet_name="Rincian_Selisih")
+            rincian_fmt.to_excel(xw_gap, index=False, sheet_name="Rincian_Selisih_View")
+
+        rincian_selisih_table = rincian_fmt
+        rincian_selisih_excel_bytes = bio_gap.getvalue()
+
     periode = f"{y}-{m:02d}"
     st.session_state["HASIL"]["rekon"] = {"periode": periode, "table": fmt, "excel_bytes": bio.getvalue()}
     if df2_fmt_mi is not None:
@@ -1117,6 +1254,15 @@ if go:
         }
     else:
         st.session_state["HASIL"].pop("detail_settlement", None)
+
+    if rincian_selisih_table is not None and rincian_selisih_excel_bytes is not None:
+        st.session_state["HASIL"]["rincian_selisih"] = {
+            "periode": periode,
+            "table": rincian_selisih_table,
+            "excel_bytes": rincian_selisih_excel_bytes,
+        }
+    else:
+        st.session_state["HASIL"].pop("rincian_selisih", None)
 
     st.success("Proses selesai. Hasil tersimpan (klik download tidak perlu proses ulang).")
 
@@ -1158,6 +1304,21 @@ if "detail_settlement" in hasil:
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         use_container_width=True,
         key="dl_detail_settlement",
+    )
+
+
+if "rincian_selisih" in hasil:
+    st.subheader("RINCIAN SELISIH ORDER ID — Tiket Detail vs Settlement Dana")
+    st.caption(f"Periode tersimpan: {hasil['rincian_selisih']['periode']}")
+    st.dataframe(_style_right(hasil["rincian_selisih"]["table"]), use_container_width=True, hide_index=True)
+
+    st.download_button(
+        "Unduh Excel (Rincian Selisih)",
+        data=hasil["rincian_selisih"]["excel_bytes"],
+        file_name=f"rincian_selisih_{hasil['rincian_selisih']['periode']}.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        use_container_width=True,
+        key="dl_rincian_selisih",
     )
 
 if not hasil:
