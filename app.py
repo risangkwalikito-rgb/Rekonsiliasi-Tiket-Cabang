@@ -355,20 +355,24 @@ def _read_tiket_detail_any(uploaded_file) -> pd.DataFrame:
     try:
         if name.endswith(".csv"):
             encodings = ("utf-8-sig", "utf-8", "cp1252", "iso-8859-1")
-            separators = (",", ";", "\t", "|", None)
 
             for enc in encodings:
-                for sep in separators:
-                    try:
-                        df = _clean_columns(_read_csv_with_sep(uploaded_file, enc, sep))
-                        if _looks_split_ok(df):
-                            return df
-                    except Exception:
-                        continue
+                try:
+                    uploaded_file.seek(0)
+                    df = pd.read_csv(
+                        uploaded_file,
+                        encoding=enc,
+                        sep=",",
+                        dtype=str,
+                        na_filter=False,
+                    )
+                    return _clean_columns(df)
+                except Exception:
+                    continue
 
             st.error(
-                f"CSV Tiket Detail gagal dipisahkan otomatis: {uploaded_file.name}. "
-                "Pastikan file tetap CSV valid dengan delimiter koma (,), titik koma (;), tab, atau pipe (|)."
+                f"CSV Tiket Detail gagal dibaca: {uploaded_file.name}. "
+                "Pastikan file CSV memakai separator koma (,)."
             )
             return pd.DataFrame()
 
