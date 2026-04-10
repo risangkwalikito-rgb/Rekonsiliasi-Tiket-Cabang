@@ -14,6 +14,24 @@ import streamlit as st
 from dateutil import parser as dtparser
 
 
+# ---------- Text cleanup ----------
+
+def _strip_outer_quotes(val) -> str:
+    if val is None:
+        return ""
+
+    s = str(val).strip().lstrip("\ufeff")
+    for _ in range(3):
+        if len(s) >= 3 and (s.startswith("='") or s.startswith('="')) and s.endswith(s[1]):
+            s = s[2:-1].strip()
+            continue
+        if len(s) >= 2 and s[0] == s[-1] and s[0] in {'"', "'"}:
+            s = s[1:-1].strip()
+            continue
+        break
+    return s
+
+
 # ---------- Utilities ----------
 
 def _parse_money(val) -> float:
@@ -57,7 +75,7 @@ def _to_num(sr: pd.Series) -> pd.Series:
 
 
 def _norm_str(val) -> str:
-    s = "" if val is None else str(val)
+    s = _strip_outer_quotes(val)
     s = unicodedata.normalize("NFKD", s)
     s = "".join(ch for ch in s if not unicodedata.combining(ch))
     return s.strip().lower()
@@ -106,7 +124,7 @@ def _norm_bank(val) -> str:
 def _norm_order_id(val) -> str:
     if val is None or (isinstance(val, float) and np.isnan(val)):
         return ""
-    s = str(val).strip()
+    s = _strip_outer_quotes(val)
     if not s or s.lower() in {"nan", "none", "null"}:
         return ""
     s = re.sub(r"\s+", "", s)
@@ -119,7 +137,7 @@ def _first_nonempty_text(sr: pd.Series) -> str:
     for v in sr:
         if pd.isna(v):
             continue
-        s = str(v).strip()
+        s = _strip_outer_quotes(v)
         if s and s.lower() not in {"nan", "none", "null"}:
             return s
     return ""
@@ -306,7 +324,7 @@ def _read_any(uploaded_file) -> pd.DataFrame:
 def _clean_columns(df: pd.DataFrame) -> pd.DataFrame:
     if df is None or df.empty:
         return df
-    df.columns = [str(c).strip().lstrip("\ufeff") for c in df.columns]
+    df.columns = [_strip_outer_quotes(c) for c in df.columns]
     return df
 
 
@@ -690,13 +708,18 @@ def _adjust_created_cutoff(dt: pd.Series, tz_mode: str) -> pd.Series:
 
 
 def _parse_ticket_created_series(sr: pd.Series, tz_mode: str = "WIB") -> pd.Series:
-    raw = sr.fillna("").astype(str).str.strip()
+    raw = sr.fillna("").map(_strip_outer_quotes)
     dt = pd.to_datetime(raw, format="%d/%m/%Y %H:%M", errors="coerce")
     missing = dt.isna() & raw.ne("")
 
     if missing.any():
         dt_seconds = pd.to_datetime(raw[missing], format="%d/%m/%Y %H:%M:%S", errors="coerce")
         dt.loc[missing] = dt_seconds
+
+    missing = dt.isna() & raw.ne("")
+    if missing.any():
+        dt_fraction = pd.to_datetime(raw[missing], format="%d/%m/%Y %H:%M:%S.%f", errors="coerce")
+        dt.loc[missing] = dt_fraction
 
     dt = _adjust_created_cutoff(dt, tz_mode)
     return dt.dt.normalize()
