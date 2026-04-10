@@ -580,7 +580,27 @@ def _find_col(df: pd.DataFrame, names: List[str]) -> Optional[str]:
     return None
 
 
-def _parse_ticket_created_series(sr: pd.Series) -> pd.Series:
+def _adjust_created_cutoff(dt: pd.Series, tz_mode: str) -> pd.Series:
+    tz_norm = (tz_mode or "WIB").strip().upper()
+    if dt.empty or tz_norm == "WIB":
+        return dt
+
+    adjusted = dt.copy()
+
+    if tz_norm == "WITA":
+        mask = adjusted.notna() & adjusted.dt.hour.eq(0)
+        adjusted.loc[mask] = adjusted.loc[mask] - pd.Timedelta(days=1)
+        return adjusted
+
+    if tz_norm == "WIT":
+        mask = adjusted.notna() & adjusted.dt.hour.isin([0, 1])
+        adjusted.loc[mask] = adjusted.loc[mask] - pd.Timedelta(days=1)
+        return adjusted
+
+    return adjusted
+
+
+def _parse_ticket_created_series(sr: pd.Series, tz_mode: str = "WIB") -> pd.Series:
     raw = sr.fillna("").astype(str).str.strip()
     dt = pd.to_datetime(raw, format="%d/%m/%Y %H:%M", errors="coerce")
     missing = dt.isna() & raw.ne("")
@@ -589,6 +609,7 @@ def _parse_ticket_created_series(sr: pd.Series) -> pd.Series:
         dt_seconds = pd.to_datetime(raw[missing], format="%d/%m/%Y %H:%M:%S", errors="coerce")
         dt.loc[missing] = dt_seconds
 
+    dt = _adjust_created_cutoff(dt, tz_mode)
     return dt.dt.normalize()
 
 
@@ -830,6 +851,18 @@ with st.sidebar:
     month_end = pd.Timestamp(y, m, calendar.monthrange(y, m)[1])
     st.caption(f"Periode dipakai: {month_start.date()} s/d {month_end.date()}")
 
+    st.header("3) Zona Waktu Tiket Detail")
+    ticket_tz_mode = st.selectbox(
+        "Penyesuaian kolom Created",
+        options=["WIB", "WITA", "WIT"],
+        index=0,
+        help=(
+            "WIB: tidak ada penyesuaian. "
+            "WITA: Created jam 00:00:00-00:59:59 mundur 1 hari. "
+            "WIT: Created jam 00:00:00-01:59:59 mundur 1 hari."
+        ),
+    )
+
     go = st.button("Proses", type="primary", use_container_width=True)
 
     if st.session_state["HASIL"]:
@@ -863,7 +896,7 @@ if go:
         st.stop()
 
     if t_created is not None:
-        tiket_df["__ticket_date__"] = _parse_ticket_created_series(tiket_df[t_created])
+        tiket_df["__ticket_date__"] = _parse_ticket_created_series(tiket_df[t_created], tz_mode=ticket_tz_mode)
         if tiket_df["__ticket_date__"].notna().any():
             t_date_action = "__ticket_date__"
 
@@ -1556,15 +1589,17 @@ if go:
         rincian_selisih_excel_bytes = bio_gap.getvalue()
 
     periode = f"{y}-{m:02d}"
-    st.session_state["HASIL"]["rekon"] = {"periode": periode, "table": fmt, "excel_bytes": bio.getvalue()}
+    zona_waktu = ticket_tz_mode
+    st.session_state["HASIL"]["rekon"] = {"periode": periode, "zona_waktu": zona_waktu, "table": fmt, "excel_bytes": bio.getvalue()}
     if df2_fmt_mi is not None:
-        st.session_state["HASIL"]["detail_tiket"] = {"periode": periode, "table": df2_fmt_mi}
+        st.session_state["HASIL"]["detail_tiket"] = {"periode": periode, "zona_waktu": zona_waktu, "table": df2_fmt_mi}
     else:
         st.session_state["HASIL"].pop("detail_tiket", None)
 
     if detail_settle_table is not None and detail_settle_excel_bytes is not None:
         st.session_state["HASIL"]["detail_settlement"] = {
             "periode": periode,
+            "zona_waktu": zona_waktu,
             "table": detail_settle_table,
             "excel_bytes": detail_settle_excel_bytes,
         }
@@ -1574,6 +1609,7 @@ if go:
     if rincian_selisih_table is not None and rincian_selisih_excel_bytes is not None:
         st.session_state["HASIL"]["rincian_selisih"] = {
             "periode": periode,
+            "zona_waktu": zona_waktu,
             "table": rincian_selisih_table,
             "excel_bytes": rincian_selisih_excel_bytes,
         }
@@ -1591,7 +1627,7 @@ hasil = st.session_state.get("HASIL", {})
 
 if "rekon" in hasil:
     st.subheader("Hasil Rekonsiliasi per Tanggal (mengikuti bulan parameter)")
-    st.caption(f"Periode tersimpan: {hasil['rekon']['periode']}")
+    st.caption(f"Periode tersimpan: {hasil['rekon']['periode']} | Zona waktu Created: {hasil['rekon'].get('zona_waktu', 'WIB')}")
     st.dataframe(_style_right(hasil["rekon"]["table"]), use_container_width=True, hide_index=True)
 
     st.download_button(
@@ -1605,12 +1641,12 @@ if "rekon" in hasil:
 
 if "detail_tiket" in hasil:
     st.subheader("Detail Tiket per Tanggal — TYPE: GO SHOW & ONLINE × SUB-TIPE (J) [HANYA PAID]")
-    st.caption(f"Periode tersimpan: {hasil['detail_tiket']['periode']}")
+    st.caption(f"Periode tersimpan: {hasil['detail_tiket']['periode']} | Zona waktu Created: {hasil['detail_tiket'].get('zona_waktu', 'WIB')}")
     st.dataframe(_style_right(hasil["detail_tiket"]["table"]), use_container_width=True, hide_index=True)
 
 if "detail_settlement" in hasil:
     st.subheader("DETAIL SETTLEMENT REPORT")
-    st.caption(f"Periode tersimpan: {hasil['detail_settlement']['periode']}")
+    st.caption(f"Periode tersimpan: {hasil['detail_settlement']['periode']} | Zona waktu Created: {hasil['detail_settlement'].get('zona_waktu', 'WIB')}")
     st.dataframe(_style_right(hasil["detail_settlement"]["table"]), use_container_width=True, hide_index=True)
 
     st.download_button(
@@ -1625,7 +1661,7 @@ if "detail_settlement" in hasil:
 
 if "rincian_selisih" in hasil:
     st.subheader("RINCIAN SELISIH ORDER ID — Tiket Detail vs Settlement Dana")
-    st.caption(f"Periode tersimpan: {hasil['rincian_selisih']['periode']}")
+    st.caption(f"Periode tersimpan: {hasil['rincian_selisih']['periode']} | Zona waktu Created: {hasil['rincian_selisih'].get('zona_waktu', 'WIB')}")
     st.dataframe(_style_right(hasil["rincian_selisih"]["table"]), use_container_width=True, hide_index=True)
 
     st.download_button(
