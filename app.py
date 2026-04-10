@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import calendar
+import csv
 import io
 import re
 import unicodedata
@@ -235,6 +236,213 @@ def _fill_action_from_created(df: pd.DataFrame, action_col: str, created_col: st
 
     df.loc[empty_mask, action_col] = filled.loc[empty_mask]
     return df
+
+
+def _read_any(uploaded_file) -> pd.DataFrame:
+    if not uploaded_file:
+        return pd.DataFrame()
+    name = uploaded_file.name.lower()
+
+    try:
+        if name.endswith(".csv"):
+            for enc in ("utf-8-sig", "utf-8", "cp1252", "iso-8859-1"):
+                try:
+                    uploaded_file.seek(0)
+                    return pd.read_csv(
+                        uploaded_file,
+                        encoding=enc,
+                        sep=None,
+                        engine="python",
+                        dtype=str,
+                        na_filter=False,
+                    )
+                except Exception:
+                    continue
+            st.error(f"CSV gagal dibaca: {uploaded_file.name}. Simpan ulang sebagai UTF-8.")
+            return pd.DataFrame()
+
+        if name.endswith((".xlsx", ".xlsm", ".xltx", ".xltm")):
+            uploaded_file.seek(0)
+            return pd.read_excel(uploaded_file, engine="openpyxl")
+
+        if name.endswith(".xls"):
+            try:
+                uploaded_file.seek(0)
+                return pd.read_excel(uploaded_file, engine="xlrd")
+            except Exception:
+                pass
+            try:
+                uploaded_file.seek(0)
+                raw = uploaded_file.read()
+                from pyexcel_xls import get_data  # type: ignore
+
+                book = get_data(io.BytesIO(raw))
+                for _sh, rows in book.items():
+                    if not rows:
+                        continue
+                    header = [str(x).strip() if x is not None else "" for x in rows[0]]
+                    body = rows[1:] if len(rows) > 1 else []
+                    return pd.DataFrame(body, columns=header)
+            except Exception:
+                pass
+            try:
+                uploaded_file.seek(0)
+                return pd.read_excel(uploaded_file, engine="openpyxl")
+            except Exception:
+                st.error("Gagal membaca file .xls. Pasang 'xlrd' atau 'pyexcel-xls', atau simpan ulang ke .xlsx.")
+                return pd.DataFrame()
+
+        uploaded_file.seek(0)
+        return pd.read_excel(uploaded_file)
+
+    except ImportError:
+        st.error("Dukungan .xls perlu paket 'xlrd' atau 'pyexcel-xls'. Tambahkan di requirements.txt.")
+        return pd.DataFrame()
+    except Exception as e:
+        st.error(f"Gagal membaca {uploaded_file.name}: {e}")
+        return pd.DataFrame()
+
+
+def _clean_columns(df: pd.DataFrame) -> pd.DataFrame:
+    if df is None or df.empty:
+        return df
+    df.columns = [str(c).strip().lstrip("\ufeff") for c in df.columns]
+    return df
+
+
+def _read_csv_with_sep(uploaded_file, enc: str, sep, engine: Optional[str] = "python") -> pd.DataFrame:
+    uploaded_file.seek(0)
+    kwargs = {
+        "encoding": enc,
+        "sep": sep,
+        "dtype": str,
+        "na_filter": False,
+    }
+    if engine is not None:
+        kwargs["engine"] = engine
+    return pd.read_csv(uploaded_file, **kwargs)
+
+
+def _read_ticket_csv_comma(uploaded_file, enc: str) -> pd.DataFrame:
+    uploaded_file.seek(0)
+    return pd.read_csv(
+        uploaded_file,
+        encoding=enc,
+        sep=",",
+        dtype=str,
+        na_filter=False,
+        low_memory=False,
+    )
+
+
+def _decode_uploaded_text(uploaded_file, enc: str) -> str:
+    uploaded_file.seek(0)
+    raw = uploaded_file.read()
+    if isinstance(raw, str):
+        return raw
+    return raw.decode(enc, errors="replace")
+
+
+def _rows_to_dataframe(rows: List[List[str]]) -> pd.DataFrame:
+    clean_rows = []
+    for row in rows:
+        if not row:
+            continue
+        vals = ["" if v is None else str(v) for v in row]
+        if not any(v.strip() for v in vals):
+            continue
+        clean_rows.append(vals)
+
+    if not clean_rows:
+        return pd.DataFrame()
+
+    max_cols = max(len(r) for r in clean_rows)
+    padded = [r + [""] * (max_cols - len(r)) for r in clean_rows]
+    header = padded[0]
+    body = padded[1:] if len(padded) > 1 else []
+    return pd.DataFrame(body, columns=header)
+
+
+def _read_ticket_csv_comma_manual(uploaded_file, enc: str) -> pd.DataFrame:
+    text_data = _decode_uploaded_text(uploaded_file, enc)
+
+    def _parse_lines(lines: List[str], unwrap_outer_quotes: bool = False) -> List[List[str]]:
+        out: List[List[str]] = []
+        for line in lines:
+            if line is None:
+                continue
+            stripped = line.rstrip("\r\n")
+            if not stripped.strip():
+                continue
+            if unwrap_outer_quotes:
+                s = stripped.strip()
+                if len(s) >= 2 and s[0] == '"' and s[-1] == '"':
+                    s = s[1:-1]
+                stripped = s
+            parsed = next(csv.reader([stripped], delimiter=",", quotechar='"'))
+            out.append(parsed)
+        return out
+
+    raw_lines = text_data.splitlines()
+    rows = _parse_lines(raw_lines, unwrap_outer_quotes=False)
+    max_cols = max((len(r) for r in rows), default=0)
+
+    if max_cols <= 1 and any("," in line for line in raw_lines[:50]):
+        rows = _parse_lines(raw_lines, unwrap_outer_quotes=True)
+
+    return _rows_to_dataframe(rows)
+
+
+def _ticket_csv_needs_manual_split(df: pd.DataFrame) -> bool:
+    if df is None or df.empty:
+        return False
+    if df.shape[1] != 1:
+        return False
+
+    header = str(df.columns[0])
+    if "," in header:
+        return True
+
+    sample = df.iloc[:20, 0].astype(str)
+    comma_hits = sample.str.contains(",", regex=False, na=False).sum()
+    return comma_hits >= max(1, min(5, len(sample)))
+
+
+def _read_tiket_detail_any(uploaded_file) -> pd.DataFrame:
+    if not uploaded_file:
+        return pd.DataFrame()
+
+    name = uploaded_file.name.lower()
+
+    try:
+        if name.endswith(".csv"):
+            for enc in ("utf-8-sig", "utf-8", "cp1252"):
+                try:
+                    df = _clean_columns(_read_ticket_csv_comma(uploaded_file, enc))
+                    if _ticket_csv_needs_manual_split(df):
+                        manual_df = _clean_columns(_read_ticket_csv_comma_manual(uploaded_file, enc))
+                        if not manual_df.empty and manual_df.shape[1] > 1:
+                            return manual_df
+                    return df
+                except Exception:
+                    try:
+                        manual_df = _clean_columns(_read_ticket_csv_comma_manual(uploaded_file, enc))
+                        if not manual_df.empty:
+                            return manual_df
+                    except Exception:
+                        continue
+
+            st.error(
+                f"CSV Tiket Detail gagal dibaca: {uploaded_file.name}. "
+                "Pastikan file CSV valid dengan delimiter koma (,)."
+            )
+            return pd.DataFrame()
+
+        return _clean_columns(_read_any(uploaded_file))
+
+    except Exception as e:
+        st.error(f"Gagal membaca file Tiket Detail {uploaded_file.name}: {e}")
+        return pd.DataFrame()
 
 
 def _read_any(uploaded_file) -> pd.DataFrame:
