@@ -211,6 +211,71 @@ def _fill_action_from_created(df: pd.DataFrame, action_col: str, created_col: st
     return df
 
 
+def _read_any(uploaded_file) -> pd.DataFrame:
+    if not uploaded_file:
+        return pd.DataFrame()
+    name = uploaded_file.name.lower()
+
+    try:
+        if name.endswith(".csv"):
+            for enc in ("utf-8-sig", "utf-8", "cp1252", "iso-8859-1"):
+                try:
+                    uploaded_file.seek(0)
+                    return pd.read_csv(
+                        uploaded_file,
+                        encoding=enc,
+                        sep=None,
+                        engine="python",
+                        dtype=str,
+                        na_filter=False,
+                    )
+                except Exception:
+                    continue
+            st.error(f"CSV gagal dibaca: {uploaded_file.name}. Simpan ulang sebagai UTF-8.")
+            return pd.DataFrame()
+
+        if name.endswith((".xlsx", ".xlsm", ".xltx", ".xltm")):
+            uploaded_file.seek(0)
+            return pd.read_excel(uploaded_file, engine="openpyxl")
+
+        if name.endswith(".xls"):
+            try:
+                uploaded_file.seek(0)
+                return pd.read_excel(uploaded_file, engine="xlrd")
+            except Exception:
+                pass
+            try:
+                uploaded_file.seek(0)
+                raw = uploaded_file.read()
+                from pyexcel_xls import get_data  # type: ignore
+
+                book = get_data(io.BytesIO(raw))
+                for _sh, rows in book.items():
+                    if not rows:
+                        continue
+                    header = [str(x).strip() if x is not None else "" for x in rows[0]]
+                    body = rows[1:] if len(rows) > 1 else []
+                    return pd.DataFrame(body, columns=header)
+            except Exception:
+                pass
+            try:
+                uploaded_file.seek(0)
+                return pd.read_excel(uploaded_file, engine="openpyxl")
+            except Exception:
+                st.error("Gagal membaca file .xls. Pasang 'xlrd' atau 'pyexcel-xls', atau simpan ulang ke .xlsx.")
+                return pd.DataFrame()
+
+        uploaded_file.seek(0)
+        return pd.read_excel(uploaded_file)
+
+    except ImportError:
+        st.error("Dukungan .xls perlu paket 'xlrd' atau 'pyexcel-xls'. Tambahkan di requirements.txt.")
+        return pd.DataFrame()
+    except Exception as e:
+        st.error(f"Gagal membaca {uploaded_file.name}: {e}")
+        return pd.DataFrame()
+
+
 def _clean_columns(df: pd.DataFrame) -> pd.DataFrame:
     if df is None or df.empty:
         return df
@@ -363,6 +428,13 @@ def _find_col(df: pd.DataFrame, names: List[str]) -> Optional[str]:
                 return c
 
     return None
+
+
+def _find_ticket_date_col(df: pd.DataFrame) -> Optional[str]:
+    return (
+        _find_col(df, ["Created", "Created Date", "Created At", "Created Time"])
+        or _find_col(df, ["Action Date", "Action"])
+    )
 
 
 def _idr_fmt(val) -> str:
@@ -622,9 +694,10 @@ if go:
         st.stop()
 
     # ---------------------- Tiket Detail (TABEL 1) ----------------------
-    t_date_action = _find_col(tiket_df, ["Action Date", "Action"])
+    t_created = _find_col(tiket_df, ["Created", "Created Date", "Created At", "Created Time"])
+    t_date_action = _find_ticket_date_col(tiket_df)
     if t_date_action is None:
-        st.error("Kolom tanggal 'Action Date' / 'Action' tidak ditemukan pada Tiket Detail.")
+        st.error("Kolom tanggal 'Created' / 'Action Date' / 'Action' tidak ditemukan pada Tiket Detail.")
         st.stop()
 
     t_amt_tarif = _find_col(tiket_df, ["Tarif", "tarif"])
@@ -665,8 +738,7 @@ if go:
 
     # ------------------  TABEL 1: TIKET DETAIL ESPAY (PAID ONLY) -------------------
     td = tiket_df.copy()
-    t_created = _find_col(tiket_df, ["Created", "Created Date", "Created At", "Created Time"])
-    if t_created is not None:
+    if t_created is not None and t_date_action != t_created:
         td = _fill_action_from_created(td, t_date_action, t_created)
 
     td[t_date_action] = pd.to_datetime(td[t_date_action].apply(_to_date), errors="coerce")
@@ -870,7 +942,7 @@ if go:
         )
         or _col_by_letter_local(tiket_df, "J")
     )
-    date_col = _find_col(tiket_df, ["Action Date", "Action"]) or _col_by_letter_local(tiket_df, "AG")
+    date_col = _find_ticket_date_col(tiket_df) or _col_by_letter_local(tiket_df, "AG")
     tarif_col = _find_col(tiket_df, ["Tarif", "tarif"]) or _col_by_letter_local(tiket_df, "Y")
     status_col = _find_col(tiket_df, ["St Bayar", "Status Bayar", "status", "status bayar"])
 
@@ -879,7 +951,7 @@ if go:
             ("TYPE (kolom B)", type_main_col),
             ("BANK (kolom I)", bank_col),
             ("TIPE / SUB-TIPE (kolom J)", type_sub_col),
-            ("ACTION/Action Date (kolom AG)", date_col),
+            ("CREATED / ACTION DATE (kolom AG fallback)", date_col),
             ("TARIF (kolom Y)", tarif_col),
             ("ST BAYAR / STATUS BAYAR", status_col),
         ]
@@ -891,7 +963,7 @@ if go:
         st.warning("Kolom wajib untuk tabel 'Detail Tiket (GO SHOW/ONLINE) [PAID]' belum lengkap: " + ", ".join(required_missing))
     else:
         tix = tiket_df.copy()
-        if t_created is not None:
+        if t_created is not None and date_col != t_created:
             tix = _fill_action_from_created(tix, date_col, t_created)
 
         tix[date_col] = pd.to_datetime(tix[date_col].apply(_to_date), errors="coerce")
@@ -1208,7 +1280,7 @@ if go:
 
     miss_rincian = [n for n, c in [
         ("Order ID Tiket Detail", t_order),
-        ("Action Date / Action", t_date_action),
+        ("Created / Action Date / Action", t_date_action),
         ("St Bayar / Status Bayar", t_stat),
         ("Bank", t_bank),
         ("Tarif", t_amt_tarif),
@@ -1221,7 +1293,7 @@ if go:
         st.warning("Kolom untuk 'RINCIAN SELISIH' belum lengkap: " + ", ".join(miss_rincian))
     else:
         td_gap = tiket_df.copy()
-        if t_created is not None:
+        if t_created is not None and t_date_action != t_created:
             td_gap = _fill_action_from_created(td_gap, t_date_action, t_created)
 
         td_gap[t_date_action] = pd.to_datetime(td_gap[t_date_action].apply(_to_date), errors="coerce")
