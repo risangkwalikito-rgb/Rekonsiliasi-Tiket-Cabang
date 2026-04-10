@@ -5,7 +5,7 @@ import io
 import re
 import unicodedata
 import zipfile
-from typing import List, Optional, Tuple
+from typing import Callable, List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
@@ -211,6 +211,83 @@ def _fill_action_from_created(df: pd.DataFrame, action_col: str, created_col: st
     return df
 
 
+def _clean_columns(df: pd.DataFrame) -> pd.DataFrame:
+    if df is None or df.empty:
+        return df
+    df.columns = [str(c).strip().lstrip("\ufeff") for c in df.columns]
+    return df
+
+
+def _read_csv_with_sep(uploaded_file, enc: str, sep) -> pd.DataFrame:
+    uploaded_file.seek(0)
+    return pd.read_csv(
+        uploaded_file,
+        encoding=enc,
+        sep=sep,
+        engine="python",
+        dtype=str,
+        na_filter=False,
+    )
+
+
+def _looks_split_ok(df: pd.DataFrame) -> bool:
+    if df is None or df.empty:
+        return False
+    if df.shape[1] > 1:
+        return True
+    if len(df.columns) != 1:
+        return False
+
+    col0 = str(df.columns[0]).strip().lower()
+    hints = (
+        "action",
+        "action date",
+        "created",
+        "tarif",
+        "bank",
+        "st bayar",
+        "status bayar",
+        "order id",
+        "payment",
+        "type",
+        "channel",
+    )
+    return any(h in col0 for h in hints)
+
+
+def _read_tiket_detail_any(uploaded_file) -> pd.DataFrame:
+    if not uploaded_file:
+        return pd.DataFrame()
+
+    name = uploaded_file.name.lower()
+
+    try:
+        if name.endswith(".csv"):
+            encodings = ("utf-8-sig", "utf-8", "cp1252", "iso-8859-1")
+            separators = (",", ";", "\t", "|", None)
+
+            for enc in encodings:
+                for sep in separators:
+                    try:
+                        df = _clean_columns(_read_csv_with_sep(uploaded_file, enc, sep))
+                        if _looks_split_ok(df):
+                            return df
+                    except Exception:
+                        continue
+
+            st.error(
+                f"CSV Tiket Detail gagal dipisahkan otomatis: {uploaded_file.name}. "
+                "Pastikan file tetap CSV valid dengan delimiter koma (,), titik koma (;), tab, atau pipe (|)."
+            )
+            return pd.DataFrame()
+
+        return _clean_columns(_read_any(uploaded_file))
+
+    except Exception as e:
+        st.error(f"Gagal membaca file Tiket Detail {uploaded_file.name}: {e}")
+        return pd.DataFrame()
+
+
 def _read_any(uploaded_file) -> pd.DataFrame:
     if not uploaded_file:
         return pd.DataFrame()
@@ -220,15 +297,7 @@ def _read_any(uploaded_file) -> pd.DataFrame:
         if name.endswith(".csv"):
             for enc in ("utf-8-sig", "utf-8", "cp1252", "iso-8859-1"):
                 try:
-                    uploaded_file.seek(0)
-                    return pd.read_csv(
-                        uploaded_file,
-                        encoding=enc,
-                        sep=None,
-                        engine="python",
-                        dtype=str,
-                        na_filter=False,
-                    )
+                    return _clean_columns(_read_csv_with_sep(uploaded_file, enc, None))
                 except Exception:
                     continue
             st.error(f"CSV gagal dibaca: {uploaded_file.name}. Simpan ulang sebagai UTF-8.")
@@ -296,13 +365,6 @@ def _find_col(df: pd.DataFrame, names: List[str]) -> Optional[str]:
     return None
 
 
-def _find_ticket_date_col(df: pd.DataFrame) -> Optional[str]:
-    return (
-        _find_col(df, ["Created", "Created Date", "Created At", "Created Time"])
-        or _find_col(df, ["Action Date", "Action"])
-    )
-
-
 def _idr_fmt(val) -> str:
     if val is None:
         return "-"
@@ -349,14 +411,14 @@ def _style_right(df: pd.DataFrame):
     return sty
 
 
-def _concat_files(files) -> pd.DataFrame:
+def _concat_files(files, reader: Callable = _read_any) -> pd.DataFrame:
     if not files:
         return pd.DataFrame()
     frames = []
     for f in files:
-        df = _read_any(f)
+        df = reader(f)
         if not df.empty:
-            df.columns = [str(c).strip().lstrip("\ufeff") for c in df.columns]
+            df = _clean_columns(df)
             df["__source__"] = getattr(f, "name", "file")
             frames.append(df)
     return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
@@ -547,7 +609,7 @@ if go:
     rk_bca_inputs = _expand_zip(rk_bca_files)
     rk_non_inputs = _expand_zip(rk_non_files)
 
-    tiket_df = _concat_files(tiket_inputs)
+    tiket_df = _concat_files(tiket_inputs, reader=_read_tiket_detail_any)
     settle_df = _concat_files(settle_inputs)
     rk_bca_df = _concat_files(rk_bca_inputs)
     rk_non_df = _concat_rk_non(rk_non_inputs)
@@ -560,10 +622,9 @@ if go:
         st.stop()
 
     # ---------------------- Tiket Detail (TABEL 1) ----------------------
-    t_created = _find_col(tiket_df, ["Created", "Created Date", "Created At", "Created Time"])
-    t_date_action = _find_ticket_date_col(tiket_df)
+    t_date_action = _find_col(tiket_df, ["Action Date", "Action"])
     if t_date_action is None:
-        st.error("Kolom tanggal 'Created' / 'Action Date' / 'Action' tidak ditemukan pada Tiket Detail.")
+        st.error("Kolom tanggal 'Action Date' / 'Action' tidak ditemukan pada Tiket Detail.")
         st.stop()
 
     t_amt_tarif = _find_col(tiket_df, ["Tarif", "tarif"])
@@ -604,7 +665,8 @@ if go:
 
     # ------------------  TABEL 1: TIKET DETAIL ESPAY (PAID ONLY) -------------------
     td = tiket_df.copy()
-    if t_created is not None and t_date_action != t_created:
+    t_created = _find_col(tiket_df, ["Created", "Created Date", "Created At", "Created Time"])
+    if t_created is not None:
         td = _fill_action_from_created(td, t_date_action, t_created)
 
     td[t_date_action] = pd.to_datetime(td[t_date_action].apply(_to_date), errors="coerce")
@@ -808,7 +870,7 @@ if go:
         )
         or _col_by_letter_local(tiket_df, "J")
     )
-    date_col = _find_ticket_date_col(tiket_df) or _col_by_letter_local(tiket_df, "AG")
+    date_col = _find_col(tiket_df, ["Action Date", "Action"]) or _col_by_letter_local(tiket_df, "AG")
     tarif_col = _find_col(tiket_df, ["Tarif", "tarif"]) or _col_by_letter_local(tiket_df, "Y")
     status_col = _find_col(tiket_df, ["St Bayar", "Status Bayar", "status", "status bayar"])
 
@@ -817,7 +879,7 @@ if go:
             ("TYPE (kolom B)", type_main_col),
             ("BANK (kolom I)", bank_col),
             ("TIPE / SUB-TIPE (kolom J)", type_sub_col),
-            ("CREATED / ACTION DATE (kolom AG fallback)", date_col),
+            ("ACTION/Action Date (kolom AG)", date_col),
             ("TARIF (kolom Y)", tarif_col),
             ("ST BAYAR / STATUS BAYAR", status_col),
         ]
@@ -829,7 +891,7 @@ if go:
         st.warning("Kolom wajib untuk tabel 'Detail Tiket (GO SHOW/ONLINE) [PAID]' belum lengkap: " + ", ".join(required_missing))
     else:
         tix = tiket_df.copy()
-        if t_created is not None and date_col != t_created:
+        if t_created is not None:
             tix = _fill_action_from_created(tix, date_col, t_created)
 
         tix[date_col] = pd.to_datetime(tix[date_col].apply(_to_date), errors="coerce")
@@ -1146,7 +1208,7 @@ if go:
 
     miss_rincian = [n for n, c in [
         ("Order ID Tiket Detail", t_order),
-        ("Created / Action Date / Action", t_date_action),
+        ("Action Date / Action", t_date_action),
         ("St Bayar / Status Bayar", t_stat),
         ("Bank", t_bank),
         ("Tarif", t_amt_tarif),
@@ -1159,7 +1221,7 @@ if go:
         st.warning("Kolom untuk 'RINCIAN SELISIH' belum lengkap: " + ", ".join(miss_rincian))
     else:
         td_gap = tiket_df.copy()
-        if t_created is not None and t_date_action != t_created:
+        if t_created is not None:
             td_gap = _fill_action_from_created(td_gap, t_date_action, t_created)
 
         td_gap[t_date_action] = pd.to_datetime(td_gap[t_date_action].apply(_to_date), errors="coerce")
