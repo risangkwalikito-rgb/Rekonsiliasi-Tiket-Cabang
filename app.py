@@ -11,6 +11,8 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 from dateutil import parser as dtparser
+from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
+from openpyxl.utils import get_column_letter
 
 
 # ---------- Utilities ----------
@@ -810,54 +812,167 @@ def _month_selector() -> Tuple[int, int]:
     return year, month
 
 
-def _flatten_export_df(df: pd.DataFrame) -> pd.DataFrame:
-    if df is None or getattr(df, "empty", True):
-        return pd.DataFrame()
 
-    out = df.copy()
-    if isinstance(out.columns, pd.MultiIndex):
-        flat_cols = []
-        for col in out.columns:
-            parts = [str(x).strip() for x in col if str(x).strip()]
-            flat_cols.append(" | ".join(parts) if parts else "")
-        out.columns = flat_cols
-    else:
-        out.columns = [str(c) for c in out.columns]
-    return out
+def _excel_number_format() -> str:
+    return '#,##0;(#,##0)'
 
 
-def _build_combined_excel_bytes(
-    rekon_df: Optional[pd.DataFrame],
-    detail_tiket_df: Optional[pd.DataFrame],
-    detail_settlement_df: Optional[pd.DataFrame],
-    rincian_selisih_df: Optional[pd.DataFrame],
+def _autofit_worksheet(ws, min_width: int = 10, max_width: int = 40) -> None:
+    for col_idx in range(1, ws.max_column + 1):
+        col_letter = get_column_letter(col_idx)
+        max_len = 0
+
+        for row_idx in range(1, ws.max_row + 1):
+            cell = ws.cell(row=row_idx, column=col_idx)
+            value = cell.value
+
+            if value is None:
+                text = ""
+            elif isinstance(value, (int, float, np.integer, np.floating)):
+                text = f"{value:,.0f}"
+            else:
+                text = str(value)
+
+            max_len = max(max_len, len(text))
+
+        ws.column_dimensions[col_letter].width = min(max(min_width, max_len + 2), max_width)
+
+
+def _style_excel_sheet(
+    ws,
+    numeric_cols: Optional[List[str]] = None,
+    date_cols: Optional[List[str]] = None,
+    center_cols: Optional[List[str]] = None,
+    freeze_panes: str = "A2",
+) -> None:
+    numeric_cols = set(numeric_cols or [])
+    date_cols = set(date_cols or [])
+    center_cols = set(center_cols or [])
+
+    thin = Side(style="thin", color="D9D9D9")
+    header_fill = PatternFill(fill_type="solid", fgColor="D9EAF7")
+
+    headers = {}
+    for col_idx in range(1, ws.max_column + 1):
+        header = ws.cell(row=1, column=col_idx)
+        header_text = "" if header.value is None else str(header.value).strip()
+        headers[col_idx] = header_text
+        header.font = Font(bold=True)
+        header.fill = header_fill
+        header.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+        header.border = Border(left=thin, right=thin, top=thin, bottom=thin)
+
+    for row_idx in range(2, ws.max_row + 1):
+        is_total_row = False
+        for col_idx in range(1, ws.max_column + 1):
+            value = ws.cell(row=row_idx, column=col_idx).value
+            if isinstance(value, str) and value.strip().upper() == "TOTAL":
+                is_total_row = True
+                break
+
+        for col_idx in range(1, ws.max_column + 1):
+            cell = ws.cell(row=row_idx, column=col_idx)
+            header = headers.get(col_idx, "")
+            cell.border = Border(left=thin, right=thin, top=thin, bottom=thin)
+
+            if is_total_row:
+                cell.font = Font(bold=True)
+
+            if header in center_cols:
+                cell.alignment = Alignment(horizontal="center", vertical="center")
+            elif header in date_cols:
+                cell.alignment = Alignment(horizontal="left", vertical="center")
+            elif header in numeric_cols:
+                if isinstance(cell.value, (int, float, np.integer, np.floating)) and not pd.isna(cell.value):
+                    cell.number_format = _excel_number_format()
+                cell.alignment = Alignment(horizontal="right", vertical="center")
+            else:
+                cell.alignment = Alignment(horizontal="left", vertical="center")
+
+    ws.freeze_panes = freeze_panes
+    _autofit_worksheet(ws)
+
+
+def _write_styled_sheet(
+    writer: pd.ExcelWriter,
+    sheet_name: str,
+    df: pd.DataFrame,
+    numeric_cols: Optional[List[str]] = None,
+    date_cols: Optional[List[str]] = None,
+    center_cols: Optional[List[str]] = None,
+    freeze_panes: str = "A2",
+) -> None:
+    export_df = df.copy()
+    export_df.to_excel(writer, index=False, sheet_name=sheet_name)
+    ws = writer.book[sheet_name]
+    _style_excel_sheet(
+        ws,
+        numeric_cols=numeric_cols,
+        date_cols=date_cols,
+        center_cols=center_cols,
+        freeze_panes=freeze_panes,
+    )
+
+
+def _build_combined_excel(
+    rekon_df: pd.DataFrame,
+    detail_tiket_df: Optional[pd.DataFrame] = None,
+    detail_settlement_df: Optional[pd.DataFrame] = None,
+    rincian_selisih_df: Optional[pd.DataFrame] = None,
 ) -> bytes:
-    bio_all = io.BytesIO()
-    with pd.ExcelWriter(bio_all, engine="openpyxl") as xw_all:
-        has_sheet = False
+    bio = io.BytesIO()
 
-        if rekon_df is not None and not getattr(rekon_df, "empty", True):
-            _flatten_export_df(rekon_df).to_excel(xw_all, index=False, sheet_name="Rekonsiliasi")
-            has_sheet = True
+    with pd.ExcelWriter(bio, engine="openpyxl") as writer:
+        _write_styled_sheet(
+            writer,
+            sheet_name="Rekonsiliasi",
+            df=rekon_df,
+            numeric_cols=[
+                "TIKET DETAIL ESPAY",
+                "SETTLEMENT DANA ESPAY",
+                "SELISIH TIKET DETAIL - SETTLEMENT",
+                "SETTLEMENT BCA",
+                "SETTLEMENT NON BCA",
+                "TOTAL SETTLEMENT",
+                "UANG MASUK BCA",
+                "UANG MASUK NON BCA",
+                "TOTAL UANG MASUK",
+                "SELISIH SETTLEMENT - UANG MASUK",
+            ],
+            date_cols=["TANGGAL"],
+            center_cols=["NO"],
+        )
 
-        if detail_tiket_df is not None and not getattr(detail_tiket_df, "empty", True):
-            _flatten_export_df(detail_tiket_df).to_excel(xw_all, index=False, sheet_name="Detail_Tiket")
-            has_sheet = True
-
-        if detail_settlement_df is not None and not getattr(detail_settlement_df, "empty", True):
-            _flatten_export_df(detail_settlement_df).to_excel(xw_all, index=False, sheet_name="Detail_Settlement")
-            has_sheet = True
-
-        if rincian_selisih_df is not None and not getattr(rincian_selisih_df, "empty", True):
-            _flatten_export_df(rincian_selisih_df).to_excel(xw_all, index=False, sheet_name="Rincian_Selisih")
-            has_sheet = True
-
-        if not has_sheet:
-            pd.DataFrame({"Info": ["Tidak ada data untuk diunduh"]}).to_excel(
-                xw_all, index=False, sheet_name="Info"
+        if detail_tiket_df is not None and not detail_tiket_df.empty:
+            _write_styled_sheet(
+                writer,
+                sheet_name="Detail_Tiket",
+                df=detail_tiket_df,
+                numeric_cols=[c for c in detail_tiket_df.columns if c not in ("NO", "Tanggal")],
+                date_cols=["Tanggal"],
+                center_cols=["NO"],
             )
 
-    return bio_all.getvalue()
+        if detail_settlement_df is not None and not detail_settlement_df.empty:
+            _write_styled_sheet(
+                writer,
+                sheet_name="Detail_Settlement",
+                df=detail_settlement_df,
+                numeric_cols=[c for c in detail_settlement_df.columns if c not in ("NO", "Tanggal")],
+                date_cols=["Tanggal"],
+                center_cols=["NO"],
+            )
+
+        if rincian_selisih_df is not None and not rincian_selisih_df.empty:
+            _write_styled_sheet(
+                writer,
+                sheet_name="Rincian_Selisih",
+                df=rincian_selisih_df,
+                numeric_cols=["TARIF TIKET DETAIL", "SETTLEMENT AMOUNT", "SELISIH"],
+                center_cols=["NO"],
+            )
+
+    return bio.getvalue()
 
 
 # ---------- App ----------
@@ -1142,49 +1257,8 @@ if go:
             continue
         fmt[c] = fmt[c].apply(_idr_fmt)
 
-    from openpyxl.styles import Alignment, Font
-
-    bio = io.BytesIO()
-    with pd.ExcelWriter(bio, engine="openpyxl") as xw:
-        view_total.to_excel(xw, index=False, sheet_name="Rekonsiliasi")
-        fmt.to_excel(xw, index=False, sheet_name="Rekonsiliasi_View")
-
-        wb = xw.book
-        ws = wb["Rekonsiliasi_View"]
-        ws.insert_rows(1)
-
-        sub_headers = [
-            "NO", "TANGGAL",
-            "TIKET DETAIL ESPAY", "SETTLEMENT DANA ESPAY", "SELISIH TIKET DETAIL - SETTLEMENT",
-            "BCA", "NON BCA", "TOTAL SETTLEMENT",
-            "BCA", "NON BCA", "TOTAL UANG MASUK",
-            "SELISIH SETTLEMENT - UANG MASUK",
-        ]
-        top_headers = [
-            "NO", "TANGGAL",
-            "TIKET DETAIL ESPAY", "SETTLEMENT DANA ESPAY", "SELISIH TIKET DETAIL - SETTLEMENT",
-            "SETTLEMENT", "SETTLEMENT", "TOTAL SETTLEMENT",
-            "UANG MASUK", "UANG MASUK", "TOTAL UANG MASUK",
-            "SELISIH SETTLEMENT - UANG MASUK",
-        ]
-
-        for col_idx, (top, sub) in enumerate(zip(top_headers, sub_headers), start=1):
-            ws.cell(row=1, column=col_idx, value=top)
-            ws.cell(row=2, column=col_idx, value=sub)
-
-        ws.merge_cells(start_row=1, start_column=6, end_row=1, end_column=7)
-        ws.merge_cells(start_row=1, start_column=9, end_row=1, end_column=10)
-
-        max_col = ws.max_column
-        for c in range(1, max_col + 1):
-            ws.cell(row=1, column=c).font = Font(bold=True)
-            ws.cell(row=2, column=c).font = Font(bold=True)
-            ws.cell(row=1, column=c).alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
-            ws.cell(row=2, column=c).alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
-        ws.row_dimensions[1].height = 22
-        ws.row_dimensions[2].height = 22
-
     # ======================================================================
+
     # ===========  TABEL: DETAIL TIKET (GO SHOW × SUB-KATEGORI)  ===========
     # ======================================================================
 
@@ -1368,7 +1442,6 @@ if go:
     # ======================================================================
 
     detail_settle_table = None
-    detail_settle_excel_bytes = None
 
     s_order = _find_col(settle_df, ["Order ID", "OrderId", "Order Number", "Order No", "OrderID", "order id"])
     miss = [n for n, c in [
@@ -1470,83 +1543,12 @@ if go:
         df3_fmt_mi.columns = pd.MultiIndex.from_tuples(top3)
         detail_settle_table = df3_fmt_mi
 
-        from openpyxl.styles import Alignment, Font
-        from openpyxl.utils import get_column_letter
-
-        bio_settle = io.BytesIO()
-        with pd.ExcelWriter(bio_settle, engine="openpyxl") as xw3:
-            df3.to_excel(xw3, index=False, sheet_name="Detail_Settlement")
-
-            wsname3 = "Detail_Settlement_View"
-            df3_fmt.to_excel(xw3, index=False, header=False, sheet_name=wsname3, startrow=2)
-            wb3 = xw3.book
-            ws3 = wb3[wsname3]
-
-            cols3 = list(df3.columns)
-            top_headers = []
-            sub_headers = []
-            for c in cols3:
-                if c in ("NO", "Tanggal"):
-                    top_headers.append("")
-                    sub_headers.append(c)
-                elif str(c).startswith("GS|"):
-                    top_headers.append("GO SHOW")
-                    sub_headers.append(str(c)[3:])
-                elif str(c).startswith("ON|"):
-                    top_headers.append("ONLINE")
-                    sub_headers.append(str(c)[3:])
-                else:
-                    top_headers.append("")
-                    sub_headers.append(str(c))
-
-            for j, (top, sub) in enumerate(zip(top_headers, sub_headers), start=1):
-                ws3.cell(row=1, column=j, value=top)
-                ws3.cell(row=2, column=j, value=sub)
-
-            def _merge_same_run(labels, row_idx):
-                start = 0
-                while start < len(labels):
-                    end = start
-                    while end + 1 < len(labels) and labels[end + 1] == labels[start]:
-                        end += 1
-                    label = labels[start]
-                    if label not in ("", None) and end >= start:
-                        ws3.merge_cells(start_row=row_idx, start_column=start + 1, end_row=row_idx, end_column=end + 1)
-                    start = end + 1
-
-            _merge_same_run(top_headers, row_idx=1)
-
-            for j, top in enumerate(top_headers, start=1):
-                if top == "":
-                    ws3.merge_cells(start_row=1, start_column=j, end_row=2, end_column=j)
-
-            max_col = len(cols3)
-            for ccol in range(1, max_col + 1):
-                ws3.cell(row=1, column=ccol).font = Font(bold=True)
-                ws3.cell(row=2, column=ccol).font = Font(bold=True)
-                ws3.cell(row=1, column=ccol).alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
-                ws3.cell(row=2, column=ccol).alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
-            ws3.row_dimensions[1].height = 22
-            ws3.row_dimensions[2].height = 22
-
-            sample_rows = min(50, df3_fmt.shape[0])
-            for idx_col, col_name in enumerate(cols3, start=1):
-                max_len = max(len(str(col_name)), len(str(sub_headers[idx_col - 1])), len(str(top_headers[idx_col - 1])))
-                for r in range(3, 3 + sample_rows):
-                    v = ws3.cell(row=r, column=idx_col).value
-                    if v is not None:
-                        max_len = max(max_len, len(str(v)))
-                ws3.column_dimensions[get_column_letter(idx_col)].width = min(max(10, max_len + 2), 45)
-
-        detail_settle_excel_bytes = bio_settle.getvalue()
-
 
     # ======================================================================
     # ========================  RINCIAN SELISIH ORDER ID  ===================
     # ======================================================================
 
     rincian_selisih_table = None
-    rincian_selisih_excel_bytes = None
 
     t_order = _find_col(tiket_df, ["Order ID", "OrderId", "Order No", "Order Number", "OrderID"])
     s_order_rincian = _find_col(settle_df, ["Order ID", "OrderId", "Order Number", "Order No", "OrderID", "order id"])
@@ -1650,24 +1652,21 @@ if go:
         for c in ["TARIF TIKET DETAIL", "SETTLEMENT AMOUNT", "SELISIH"]:
             rincian_fmt[c] = rincian_fmt[c].apply(_idr_fmt)
 
-        bio_gap = io.BytesIO()
-        with pd.ExcelWriter(bio_gap, engine="openpyxl") as xw_gap:
-            rincian_view.to_excel(xw_gap, index=False, sheet_name="Rincian_Selisih")
-            rincian_fmt.to_excel(xw_gap, index=False, sheet_name="Rincian_Selisih_View")
-
-        rincian_selisih_table = rincian_fmt
-        rincian_selisih_excel_bytes = bio_gap.getvalue()
+    combined_excel_bytes = _build_combined_excel(
+        rekon_df=view_total,
+        detail_tiket_df=df2 if df2_fmt_mi is not None else None,
+        detail_settlement_df=df3 if detail_settle_table is not None else None,
+        rincian_selisih_df=rincian_view if rincian_selisih_table is not None else None,
+    )
 
     periode = f"{y}-{m:02d}"
     zona_waktu = ticket_tz_mode
-    gabungan_excel_bytes = _build_combined_excel_bytes(
-        rekon_df=fmt,
-        detail_tiket_df=df2_fmt_mi,
-        detail_settlement_df=detail_settle_table,
-        rincian_selisih_df=rincian_selisih_table,
-    )
-
-    st.session_state["HASIL"]["rekon"] = {"periode": periode, "zona_waktu": zona_waktu, "table": fmt}
+    st.session_state["HASIL"]["rekon"] = {
+        "periode": periode,
+        "zona_waktu": zona_waktu,
+        "table": fmt,
+        "excel_bytes": combined_excel_bytes,
+    }
     if df2_fmt_mi is not None:
         st.session_state["HASIL"]["detail_tiket"] = {"periode": periode, "zona_waktu": zona_waktu, "table": df2_fmt_mi}
     else:
@@ -1691,13 +1690,7 @@ if go:
     else:
         st.session_state["HASIL"].pop("rincian_selisih", None)
 
-    st.session_state["HASIL"]["download_all"] = {
-        "periode": periode,
-        "zona_waktu": zona_waktu,
-        "excel_bytes": gabungan_excel_bytes,
-    }
-
-    st.success("Proses selesai. File unduhan digabungkan dalam satu Excel.")
+    st.success("Proses selesai. Hasil tersimpan.")
 
 
 # =========================
@@ -1706,31 +1699,34 @@ if go:
 
 hasil = st.session_state.get("HASIL", {})
 
-if "download_all" in hasil:
-    st.download_button(
-        "Unduh Excel Gabungan (4 Tabel)",
-        data=hasil["download_all"]["excel_bytes"],
-        file_name=f"rekonsiliasi_gabungan_{hasil['download_all']['periode']}.xlsx",
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        use_container_width=True,
-        key="dl_gabungan",
-    )
-
 if "rekon" in hasil:
-    st.subheader("Hasil Rekonsiliasi")
-    st.caption(f"Periode: {hasil['rekon']['periode']} | Zona waktu Created: {hasil['rekon'].get('zona_waktu', 'WIB')}")
+    st.subheader("Hasil Rekonsiliasi per Tanggal (mengikuti bulan parameter)")
+    st.caption(f"Periode tersimpan: {hasil['rekon']['periode']} | Zona waktu Created: {hasil['rekon'].get('zona_waktu', 'WIB')}")
     st.dataframe(_style_right(hasil["rekon"]["table"]), use_container_width=True, hide_index=True)
 
+    st.download_button(
+        "Unduh Excel Gabungan",
+        data=hasil["rekon"]["excel_bytes"],
+        file_name=f"rekonsiliasi_gabungan_{hasil['rekon']['periode']}.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        use_container_width=True,
+        key="dl_rekon_gabungan",
+    )
+
 if "detail_tiket" in hasil:
-    st.subheader("Detail Tiket")
+    st.subheader("Detail Tiket per Tanggal — TYPE: GO SHOW & ONLINE × SUB-TIPE (J) [HANYA PAID]")
+    st.caption(f"Periode tersimpan: {hasil['detail_tiket']['periode']} | Zona waktu Created: {hasil['detail_tiket'].get('zona_waktu', 'WIB')}")
     st.dataframe(_style_right(hasil["detail_tiket"]["table"]), use_container_width=True, hide_index=True)
 
 if "detail_settlement" in hasil:
-    st.subheader("Detail Settlement")
+    st.subheader("DETAIL SETTLEMENT REPORT")
+    st.caption(f"Periode tersimpan: {hasil['detail_settlement']['periode']} | Zona waktu Created: {hasil['detail_settlement'].get('zona_waktu', 'WIB')}")
     st.dataframe(_style_right(hasil["detail_settlement"]["table"]), use_container_width=True, hide_index=True)
 
+
 if "rincian_selisih" in hasil:
-    st.subheader("Rincian Selisih Order ID")
+    st.subheader("RINCIAN SELISIH ORDER ID — Tiket Detail vs Settlement Dana")
+    st.caption(f"Periode tersimpan: {hasil['rincian_selisih']['periode']} | Zona waktu Created: {hasil['rincian_selisih'].get('zona_waktu', 'WIB')}")
     st.dataframe(_style_right(hasil["rincian_selisih"]["table"]), use_container_width=True, hide_index=True)
 
 if not hasil:
