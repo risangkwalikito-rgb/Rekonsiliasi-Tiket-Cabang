@@ -415,10 +415,29 @@ def _promote_ticket_header(df: pd.DataFrame, scan_max: int = 20) -> pd.DataFrame
     return _clean_columns(out)
 
 
-def _ticket_df_quality_score(df: pd.DataFrame) -> Tuple[int, int, int]:
+def _ticket_required_col_count(df: pd.DataFrame) -> int:
     if df is None or df.empty:
-        return (-1, -1, -1)
+        return 0
 
+    required_groups = [
+        ["Created", "Created Date", "Created At", "Created Time"],
+        ["Tarif", "tarif"],
+        ["Bank", "Payment Channel", "channel", "payment method"],
+        ["St Bayar", "Status Bayar", "status", "status bayar"],
+    ]
+
+    found = 0
+    for names in required_groups:
+        if _find_col(df, names) is not None:
+            found += 1
+    return found
+
+
+def _ticket_df_quality_score(df: pd.DataFrame) -> Tuple[int, int, int, int]:
+    if df is None or df.empty:
+        return (-1, -1, -1, -1)
+
+    required_count = _ticket_required_col_count(df)
     header_score = _ticket_header_score(df.columns)
     width = df.shape[1]
 
@@ -437,16 +456,22 @@ def _ticket_df_quality_score(df: pd.DataFrame) -> Tuple[int, int, int]:
         if any(marker in _norm_str(v) for v in sampled_cells):
             data_hint_score += 1
 
-    return (header_score, width, data_hint_score)
+    return (required_count, header_score, width, data_hint_score)
+
+
+def _ticket_csv_parse_is_valid(df: pd.DataFrame) -> bool:
+    if df is None or df.empty:
+        return False
+    required_count, header_score, width, _ = _ticket_df_quality_score(df)
+    if width <= 1:
+        return False
+    if required_count >= 4:
+        return True
+    return required_count >= 3 and header_score >= 4
 
 
 def _ticket_csv_parse_is_suspicious(df: pd.DataFrame) -> bool:
-    if df is None or df.empty:
-        return True
-    header_score, width, _ = _ticket_df_quality_score(df)
-    if width <= 1:
-        return True
-    return header_score < 4
+    return not _ticket_csv_parse_is_valid(df)
 
 
 def _read_ticket_csv_comma(uploaded_file, enc: str) -> pd.DataFrame:
@@ -549,30 +574,32 @@ def _read_tiket_detail_any(uploaded_file) -> pd.DataFrame:
     try:
         if name.endswith(".csv"):
             best_df = pd.DataFrame()
-            best_score = (-1, -1, -1)
+            best_score = (-1, -1, -1, -1)
 
             for enc in ("utf-8-sig", "utf-8", "cp1252", "iso-8859-1"):
                 try:
                     pandas_df = _promote_ticket_header(_clean_columns(_read_ticket_csv_comma(uploaded_file, enc)))
                     pandas_score = _ticket_df_quality_score(pandas_df)
+
+                    if _ticket_csv_parse_is_valid(pandas_df):
+                        return pandas_df
+
                     if pandas_score > best_score:
                         best_df = pandas_df
                         best_score = pandas_score
-
-                    if not _ticket_csv_parse_is_suspicious(pandas_df):
-                        return pandas_df
                 except Exception:
                     pass
 
                 try:
                     manual_df = _promote_ticket_header(_clean_columns(_read_ticket_csv_comma_manual(uploaded_file, enc)))
                     manual_score = _ticket_df_quality_score(manual_df)
+
+                    if _ticket_csv_parse_is_valid(manual_df):
+                        return manual_df
+
                     if manual_score > best_score:
                         best_df = manual_df
                         best_score = manual_score
-
-                    if not _ticket_csv_parse_is_suspicious(manual_df):
-                        return manual_df
                 except Exception:
                     pass
 
