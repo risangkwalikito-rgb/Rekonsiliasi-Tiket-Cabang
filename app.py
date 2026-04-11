@@ -1700,6 +1700,8 @@ if go:
         for c in ["TARIF TIKET DETAIL", "SETTLEMENT AMOUNT", "SELISIH"]:
             rincian_fmt[c] = rincian_fmt[c].apply(_idr_fmt)
 
+        rincian_selisih_table = rincian_fmt
+
     combined_excel_bytes = _build_combined_excel(
         rekon_df=view_total,
         detail_tiket_df=df2 if df2_fmt_mi is not None else None,
