@@ -14,24 +14,6 @@ import streamlit as st
 from dateutil import parser as dtparser
 
 
-# ---------- Text cleanup ----------
-
-def _strip_outer_quotes(val) -> str:
-    if val is None:
-        return ""
-
-    s = str(val).strip().lstrip("\ufeff")
-    for _ in range(3):
-        if len(s) >= 3 and (s.startswith("='") or s.startswith('="')) and s.endswith(s[1]):
-            s = s[2:-1].strip()
-            continue
-        if len(s) >= 2 and s[0] == s[-1] and s[0] in {'"', "'"}:
-            s = s[1:-1].strip()
-            continue
-        break
-    return s
-
-
 # ---------- Utilities ----------
 
 def _parse_money(val) -> float:
@@ -75,7 +57,7 @@ def _to_num(sr: pd.Series) -> pd.Series:
 
 
 def _norm_str(val) -> str:
-    s = _strip_outer_quotes(val)
+    s = "" if val is None else str(val)
     s = unicodedata.normalize("NFKD", s)
     s = "".join(ch for ch in s if not unicodedata.combining(ch))
     return s.strip().lower()
@@ -124,7 +106,7 @@ def _norm_bank(val) -> str:
 def _norm_order_id(val) -> str:
     if val is None or (isinstance(val, float) and np.isnan(val)):
         return ""
-    s = _strip_outer_quotes(val)
+    s = str(val).strip()
     if not s or s.lower() in {"nan", "none", "null"}:
         return ""
     s = re.sub(r"\s+", "", s)
@@ -137,7 +119,7 @@ def _first_nonempty_text(sr: pd.Series) -> str:
     for v in sr:
         if pd.isna(v):
             continue
-        s = _strip_outer_quotes(v)
+        s = str(v).strip()
         if s and s.lower() not in {"nan", "none", "null"}:
             return s
     return ""
@@ -324,7 +306,7 @@ def _read_any(uploaded_file) -> pd.DataFrame:
 def _clean_columns(df: pd.DataFrame) -> pd.DataFrame:
     if df is None or df.empty:
         return df
-    df.columns = [_strip_outer_quotes(c) for c in df.columns]
+    df.columns = [str(c).strip().lstrip("\ufeff") for c in df.columns]
     return df
 
 
@@ -708,18 +690,13 @@ def _adjust_created_cutoff(dt: pd.Series, tz_mode: str) -> pd.Series:
 
 
 def _parse_ticket_created_series(sr: pd.Series, tz_mode: str = "WIB") -> pd.Series:
-    raw = sr.fillna("").map(_strip_outer_quotes)
+    raw = sr.fillna("").astype(str).str.strip()
     dt = pd.to_datetime(raw, format="%d/%m/%Y %H:%M", errors="coerce")
     missing = dt.isna() & raw.ne("")
 
     if missing.any():
         dt_seconds = pd.to_datetime(raw[missing], format="%d/%m/%Y %H:%M:%S", errors="coerce")
         dt.loc[missing] = dt_seconds
-
-    missing = dt.isna() & raw.ne("")
-    if missing.any():
-        dt_fraction = pd.to_datetime(raw[missing], format="%d/%m/%Y %H:%M:%S.%f", errors="coerce")
-        dt.loc[missing] = dt_fraction
 
     dt = _adjust_created_cutoff(dt, tz_mode)
     return dt.dt.normalize()
@@ -931,6 +908,8 @@ st.markdown(
 
 if "HASIL" not in st.session_state:
     st.session_state["HASIL"] = {}
+if "LAST_PARAMS" not in st.session_state:
+    st.session_state["LAST_PARAMS"] = None
 
 with st.sidebar:
     st.header("1) Upload Sumber (multi-file)")
@@ -961,7 +940,6 @@ with st.sidebar:
     y, m = _month_selector()
     month_start = pd.Timestamp(y, m, 1)
     month_end = pd.Timestamp(y, m, calendar.monthrange(y, m)[1])
-    st.caption(f"Periode dipakai: {month_start.date()} s/d {month_end.date()}")
 
     st.header("3) Zona Waktu Tiket Detail")
     ticket_tz_mode = st.selectbox(
@@ -974,6 +952,14 @@ with st.sidebar:
             "WIT: Created jam 00:00:00-01:59:59 mundur 1 hari."
         ),
     )
+
+    params_fingerprint = f"{y}-{m:02d}-{ticket_tz_mode}"
+    last_params = st.session_state.get("LAST_PARAMS")
+    if last_params is not None and last_params != params_fingerprint:
+        st.session_state["HASIL"] = {}
+    st.session_state["LAST_PARAMS"] = params_fingerprint
+
+    st.caption(f"Periode dipakai: {month_start.date()} s/d {month_end.date()} | Zona waktu Created: {ticket_tz_mode}")
 
     go = st.button("Proses", type="primary", use_container_width=True)
 
