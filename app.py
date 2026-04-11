@@ -602,12 +602,23 @@ def _adjust_created_cutoff(dt: pd.Series, tz_mode: str) -> pd.Series:
 
 def _parse_ticket_created_series(sr: pd.Series, tz_mode: str = "WIB") -> pd.Series:
     raw = sr.fillna("").astype(str).str.strip()
+
     dt = pd.to_datetime(raw, format="%d/%m/%Y %H:%M", errors="coerce")
     missing = dt.isna() & raw.ne("")
 
     if missing.any():
         dt_seconds = pd.to_datetime(raw[missing], format="%d/%m/%Y %H:%M:%S", errors="coerce")
         dt.loc[missing] = dt_seconds
+
+    missing = dt.isna() & raw.ne("")
+    if missing.any():
+        dt_ymd_seconds = pd.to_datetime(raw[missing], format="%Y-%m-%d %H:%M:%S", errors="coerce")
+        dt.loc[missing] = dt_ymd_seconds
+
+    missing = dt.isna() & raw.ne("")
+    if missing.any():
+        dt_ymd = pd.to_datetime(raw[missing], format="%Y-%m-%d %H:%M", errors="coerce")
+        dt.loc[missing] = dt_ymd
 
     dt = _adjust_created_cutoff(dt, tz_mode)
     return dt.dt.normalize()
