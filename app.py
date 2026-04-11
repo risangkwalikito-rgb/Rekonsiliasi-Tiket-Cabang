@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import calendar
-import csv
 import io
 import re
 import unicodedata
@@ -53,42 +52,7 @@ def _parse_money(val) -> float:
 
 
 def _to_num(sr: pd.Series) -> pd.Series:
-    if isinstance(sr, pd.DataFrame):
-        if sr.shape[1] == 0:
-            return pd.Series(dtype=float)
-        sr = sr.iloc[:, 0]
-
-    if pd.api.types.is_datetime64_any_dtype(sr):
-        sr = sr.astype(str)
-
     return sr.apply(_parse_money).astype(float)
-
-
-def _first_series(obj) -> pd.Series:
-    if isinstance(obj, pd.DataFrame):
-        if obj.shape[1] == 0:
-            return pd.Series(dtype=object)
-        return obj.iloc[:, 0]
-    return obj
-
-
-def _ensure_datetime_series(sr: pd.Series) -> pd.Series:
-    sr = _first_series(sr)
-    if sr is None:
-        return pd.Series(dtype="datetime64[ns]")
-
-    if pd.api.types.is_datetime64_any_dtype(sr):
-        return pd.to_datetime(sr, errors="coerce")
-
-    raw = sr.astype(str).map(_strip_outer_quotes).str.strip()
-    dt = pd.to_datetime(raw, errors="coerce")
-    missing = dt.isna() & raw.ne("") & raw.ne("nan") & raw.ne("None")
-
-    if missing.any():
-        dt2 = raw[missing].apply(_to_date)
-        dt.loc[missing] = pd.to_datetime(dt2, errors="coerce")
-
-    return pd.to_datetime(dt, errors="coerce")
 
 
 def _norm_str(val) -> str:
@@ -98,15 +62,6 @@ def _norm_str(val) -> str:
     return s.strip().lower()
 
 
-
-
-def _strip_outer_quotes(val):
-    if val is None:
-        return val
-    s = str(val).strip()
-    if len(s) >= 2 and s[0] == s[-1] and s[0] in {'"', "'"}:
-        s = s[1:-1].strip()
-    return s
 
 def _is_bca_va_product(prod_val) -> bool:
     """Return True for BCA Virtual Account products (incl. blu variants).
@@ -347,463 +302,6 @@ def _read_any(uploaded_file) -> pd.DataFrame:
         return pd.DataFrame()
 
 
-
-def _make_columns_unique(columns) -> List[str]:
-    seen = {}
-    out = []
-    for raw in columns:
-        col = _strip_outer_quotes(str(raw).strip().lstrip("\ufeff"))
-        n = seen.get(col, 0) + 1
-        seen[col] = n
-        out.append(col if n == 1 else f"{col}__{n}")
-    return out
-
-
-def _clean_columns(df: pd.DataFrame) -> pd.DataFrame:
-    if df is None or df.empty:
-        return df
-
-    out = df.copy()
-    out.columns = _make_columns_unique(out.columns)
-
-    for c in out.columns:
-        if out[c].dtype == object:
-            out[c] = out[c].map(_strip_outer_quotes)
-
-    return out
-
-
-def _money_parse_score(sr: pd.Series, sample_rows: int = 300) -> int:
-    if sr is None:
-        return -1
-
-    if isinstance(sr, pd.DataFrame):
-        if sr.shape[1] == 0:
-            return -1
-        sr = sr.iloc[:, 0]
-
-    if pd.api.types.is_datetime64_any_dtype(sr):
-        return -1
-
-    raw = sr.head(sample_rows).fillna("").astype(str).map(_strip_outer_quotes).str.strip()
-    if raw.empty:
-        return -1
-
-    has_digit = raw.str.contains(r"\d", regex=True, na=False)
-    if not has_digit.any():
-        return -1
-
-    parsed = raw.apply(_parse_money)
-    zero_like = raw.str.fullmatch(r"[-(\s]*0+[\.,0\s)]*", na=False)
-    valid = has_digit & ((parsed != 0) | zero_like)
-
-    return int(valid.sum())
-
-
-def _col_by_letter(df: pd.DataFrame, letters: str) -> Optional[str]:
-    if df is None or df.empty:
-        return None
-    s = letters.strip().upper()
-    if not s:
-        return None
-    n = 0
-    for ch in s:
-        if not ("A" <= ch <= "Z"):
-            return None
-        n = n * 26 + (ord(ch) - ord("A") + 1)
-    idx0 = n - 1
-    return df.columns[idx0] if 0 <= idx0 < len(df.columns) else None
-
-
-def _resolve_ticket_tarif_col(df: pd.DataFrame) -> Optional[str]:
-    if df is None or df.empty:
-        return None
-
-    candidate_names = ["Tarif", "tarif", "Amount", "Nominal", "Jumlah"]
-    candidates = []
-    seen = set()
-
-    for col in [
-        _find_best_numeric_col(df, ["Tarif", "tarif"]),
-        _find_best_numeric_col(df, ["Amount", "Nominal", "Jumlah"]),
-        _col_by_letter(df, "Y"),
-    ]:
-        if col and col not in seen:
-            candidates.append(col)
-            seen.add(col)
-
-    # Scan all columns as last resort, but prefer columns that look money-like.
-    for c in df.columns:
-        if not isinstance(c, str) or c in seen:
-            continue
-        label = c.lower()
-        if any(k in label for k in ["tarif", "amount", "nominal", "jumlah", "fare", "price"]):
-            candidates.append(c)
-            seen.add(c)
-
-    best_col = None
-    best_score = -1
-
-    for c in candidates:
-        score = _money_parse_score(df[c])
-        if score > best_score:
-            best_col = c
-            best_score = score
-
-    if best_score > 0 and best_col is not None:
-        return best_col
-
-    # Absolute fallback: pick the most numeric-looking column in the whole dataframe.
-    for c in df.columns:
-        if not isinstance(c, str):
-            continue
-        score = _money_parse_score(df[c])
-        if score > best_score:
-            best_col = c
-            best_score = score
-
-    return best_col
-
-
-def _find_best_numeric_col(df: pd.DataFrame, names: List[str]) -> Optional[str]:
-    if df is None or df.empty:
-        return None
-
-    cols = [c for c in df.columns if isinstance(c, str)]
-    candidates: List[str] = []
-    seen = set()
-
-    exact_map = {c.lower().strip().lstrip("\ufeff"): c for c in cols}
-    for n in names:
-        key = n.lower().strip()
-        if key in exact_map and exact_map[key] not in seen:
-            candidates.append(exact_map[key])
-            seen.add(exact_map[key])
-
-    for n in names:
-        key = n.lower().strip()
-        for c in cols:
-            if key in c.lower() and c not in seen:
-                candidates.append(c)
-                seen.add(c)
-
-    if not candidates:
-        return None
-
-    best_col = None
-    best_score = -1
-    for c in candidates:
-        score = _money_parse_score(df[c])
-        if score > best_score:
-            best_col = c
-            best_score = score
-
-    if best_col is not None:
-        return best_col
-
-    return candidates[0]
-
-
-def _read_csv_with_sep(uploaded_file, enc: str, sep, engine: Optional[str] = "python") -> pd.DataFrame:
-    uploaded_file.seek(0)
-    kwargs = {
-        "encoding": enc,
-        "sep": sep,
-        "dtype": str,
-        "na_filter": False,
-    }
-    if engine is not None:
-        kwargs["engine"] = engine
-    return pd.read_csv(uploaded_file, **kwargs)
-
-
-def _read_ticket_csv_comma(uploaded_file, enc: str) -> pd.DataFrame:
-    uploaded_file.seek(0)
-    return pd.read_csv(
-        uploaded_file,
-        encoding=enc,
-        sep=",",
-        dtype=str,
-        na_filter=False,
-        low_memory=False,
-    )
-
-
-
-def _decode_uploaded_text(uploaded_file, enc: str) -> str:
-    uploaded_file.seek(0)
-    raw = uploaded_file.read()
-    if isinstance(raw, str):
-        return raw
-    return raw.decode(enc, errors="replace")
-
-
-
-def _rows_to_dataframe(rows: List[List[str]]) -> pd.DataFrame:
-    clean_rows: List[List[str]] = []
-    for row in rows:
-        vals = [_strip_outer_quotes("" if v is None else str(v)) for v in row]
-        if any(v.strip() for v in vals):
-            clean_rows.append(vals)
-
-    if not clean_rows:
-        return pd.DataFrame()
-
-    max_cols = max(len(r) for r in clean_rows)
-    padded = [r + [""] * (max_cols - len(r)) for r in clean_rows]
-    header = padded[0]
-    body = padded[1:] if len(padded) > 1 else []
-    return pd.DataFrame(body, columns=header)
-
-
-def _ticket_header_markers() -> Tuple[str, ...]:
-    return (
-        "created",
-        "action date",
-        "action",
-        "tarif",
-        "bank",
-        "st bayar",
-        "status bayar",
-        "order id",
-        "type",
-        "payment type",
-        "payment channel",
-        "channel",
-    )
-
-
-
-def _ticket_sample_value_score(df: pd.DataFrame) -> Tuple[int, int, int]:
-    if df is None or df.empty:
-        return (0, 0, 0)
-
-    sample_rows = min(200, len(df))
-
-    created_col = _find_col(df, ["Created", "Created Date", "Created At", "Created Time"])
-    tarif_col = _resolve_ticket_tarif_col(df)
-    bank_col = _find_col(df, ["Bank", "Payment Channel", "channel", "payment method"])
-    status_col = _find_col(df, ["St Bayar", "Status Bayar", "status", "status bayar"])
-
-    created_ok = 0
-    if created_col is not None:
-        raw = df[created_col].head(sample_rows).fillna("").astype(str).map(_strip_outer_quotes).str.strip()
-        dt = pd.to_datetime(raw, format="%d/%m/%Y %H:%M", errors="coerce")
-        missing = dt.isna() & raw.ne("")
-        if missing.any():
-            dt2 = pd.to_datetime(raw[missing], format="%d/%m/%Y %H:%M:%S", errors="coerce")
-            dt.loc[missing] = dt2
-        created_ok = int(dt.notna().sum())
-
-    tarif_ok = 0
-    if tarif_col is not None:
-        raw_tarif = df[tarif_col].head(sample_rows).fillna("").astype(str).map(_strip_outer_quotes).str.strip()
-        parsed_tarif = raw_tarif.apply(_parse_money)
-        tarif_ok = int(((raw_tarif.ne("")) & (parsed_tarif != 0)).sum())
-
-    filter_ok = 0
-    if bank_col is not None and status_col is not None:
-        bank_norm = df[bank_col].head(sample_rows).apply(_norm_str)
-        status_norm = df[status_col].head(sample_rows).apply(_norm_str)
-        filter_ok = int((bank_norm.eq("espay") & status_norm.eq("paid")).sum())
-
-    return (created_ok, tarif_ok, filter_ok)
-
-def _ticket_header_score(values) -> int:
-    markers = _ticket_header_markers()
-    norm_vals = [_norm_str(v) for v in values if str(v).strip()]
-    score = 0
-    for marker in markers:
-        if any(marker in v for v in norm_vals):
-            score += 1
-    return score
-
-
-
-def _promote_ticket_header(df: pd.DataFrame, scan_max: int = 20) -> pd.DataFrame:
-    if df is None or df.empty:
-        return df
-
-    df = _clean_columns(df)
-    current_required = _ticket_required_col_count(df)
-    current_score = _ticket_header_score(df.columns)
-
-    if current_required >= 3 or current_score >= 4:
-        return df
-
-    best_row = None
-    best_score = current_score
-
-    for r in range(min(scan_max, len(df))):
-        row_vals = [_strip_outer_quotes(x) for x in df.iloc[r].tolist()]
-        score = _ticket_header_score(row_vals)
-        if score > best_score:
-            best_score = score
-            best_row = r
-
-    if best_row is None or best_score < 4:
-        return df
-
-    cols = [_strip_outer_quotes(str(x).strip()) for x in df.iloc[best_row].tolist()]
-    out = df.iloc[best_row + 1 :].copy()
-    out.columns = cols
-    out = _clean_columns(out)
-
-    if _ticket_required_col_count(out) >= max(current_required, 3):
-        return out
-
-    return df
-
-
-def _ticket_required_col_count(df: pd.DataFrame) -> int:
-    if df is None or df.empty:
-        return 0
-
-    required_groups = [
-        ["Created", "Created Date", "Created At", "Created Time"],
-        ["Tarif", "tarif"],
-        ["Bank", "Payment Channel", "channel", "payment method"],
-        ["St Bayar", "Status Bayar", "status", "status bayar"],
-    ]
-
-    found = 0
-    for names in required_groups:
-        if _find_col(df, names) is not None:
-            found += 1
-    return found
-
-
-
-def _ticket_df_quality_score(df: pd.DataFrame) -> Tuple[int, int, int, int, int, int, int]:
-    if df is None or df.empty:
-        return (-1, -1, -1, -1, -1, -1, -1)
-
-    required_count = _ticket_required_col_count(df)
-    header_score = _ticket_header_score(df.columns)
-    width = df.shape[1]
-
-    sampled_cells = []
-    if width > 0:
-        sample_rows = min(20, len(df))
-        for r in range(sample_rows):
-            for v in df.iloc[r].tolist():
-                s = str(v).strip()
-                if s:
-                    sampled_cells.append(s)
-
-    data_hint_score = 0
-    hint_markers = ("paid", "espay", "go show", "online", "bca", "bri", "mandiri")
-    for marker in hint_markers:
-        if any(marker in _norm_str(v) for v in sampled_cells):
-            data_hint_score += 1
-
-    created_ok, tarif_ok, filter_ok = _ticket_sample_value_score(df)
-
-    return (
-        required_count,
-        created_ok,
-        tarif_ok,
-        filter_ok,
-        header_score,
-        width,
-        data_hint_score,
-    )
-
-
-
-def _ticket_csv_parse_is_valid(df: pd.DataFrame) -> bool:
-    if df is None or df.empty:
-        return False
-
-    required_count, created_ok, tarif_ok, filter_ok, header_score, width, _ = _ticket_df_quality_score(df)
-
-    if width <= 1:
-        return False
-
-    if required_count >= 4 and (created_ok > 0 or tarif_ok > 0):
-        return True
-
-    if required_count >= 3 and created_ok > 0 and tarif_ok > 0:
-        return True
-
-    return required_count >= 3 and header_score >= 4 and (created_ok > 0 or filter_ok > 0)
-
-
-def _ticket_csv_parse_is_suspicious(df: pd.DataFrame) -> bool:
-    return not _ticket_csv_parse_is_valid(df)
-
-
-def _read_ticket_csv_comma(uploaded_file, enc: str) -> pd.DataFrame:
-    uploaded_file.seek(0)
-    return pd.read_csv(
-        uploaded_file,
-        encoding=enc,
-        sep=",",
-        dtype=str,
-        na_filter=False,
-        low_memory=False,
-    )
-
-
-def _read_ticket_csv_comma_manual(uploaded_file, enc: str) -> pd.DataFrame:
-    text_data = _decode_uploaded_text(uploaded_file, enc)
-
-    candidates: List[pd.DataFrame] = []
-
-    try:
-        reader = csv.reader(io.StringIO(text_data), delimiter=",", quotechar='"', doublequote=True)
-        rows = [row for row in reader]
-        candidates.append(_rows_to_dataframe(rows))
-    except Exception:
-        pass
-
-    raw_lines = text_data.splitlines()
-
-    def _parse_lines(unwrap_outer_quotes: bool = False, simple_split: bool = False) -> pd.DataFrame:
-        rows: List[List[str]] = []
-        for line in raw_lines:
-            if line is None:
-                continue
-            stripped = line.rstrip("\r\n")
-            if not stripped.strip():
-                continue
-
-            working = stripped
-            if unwrap_outer_quotes:
-                s = working.strip()
-                if len(s) >= 2 and s[0] == '"' and s[-1] == '"':
-                    s = s[1:-1]
-                working = s
-
-            try:
-                if simple_split:
-                    row = working.split(",")
-                else:
-                    row = next(csv.reader([working], delimiter=",", quotechar='"', doublequote=True))
-            except Exception:
-                row = working.split(",")
-
-            rows.append(row)
-
-        return _rows_to_dataframe(rows)
-
-    candidates.append(_parse_lines(unwrap_outer_quotes=False, simple_split=False))
-    candidates.append(_parse_lines(unwrap_outer_quotes=True, simple_split=False))
-    candidates.append(_parse_lines(unwrap_outer_quotes=True, simple_split=True))
-
-    best_df = pd.DataFrame()
-    best_score = (-1, -1, -1)
-
-    for candidate in candidates:
-        candidate = _promote_ticket_header(candidate)
-        score = _ticket_df_quality_score(candidate)
-        if score > best_score:
-            best_df = candidate
-            best_score = score
-
-    return _clean_columns(best_df)
-
-
 def _clean_columns(df: pd.DataFrame) -> pd.DataFrame:
     if df is None or df.empty:
         return df
@@ -824,6 +322,17 @@ def _read_csv_with_sep(uploaded_file, enc: str, sep, engine: Optional[str] = "py
     return pd.read_csv(uploaded_file, **kwargs)
 
 
+def _read_ticket_csv_comma(uploaded_file, enc: str) -> pd.DataFrame:
+    uploaded_file.seek(0)
+    return pd.read_csv(
+        uploaded_file,
+        encoding=enc,
+        sep=",",
+        dtype=str,
+        na_filter=False,
+        low_memory=False,
+    )
+
 
 def _read_tiket_detail_any(uploaded_file) -> pd.DataFrame:
     if not uploaded_file:
@@ -833,66 +342,157 @@ def _read_tiket_detail_any(uploaded_file) -> pd.DataFrame:
 
     try:
         if name.endswith(".csv"):
-            best_df = pd.DataFrame()
-            best_score = (-1, -1, -1, -1, -1, -1, -1)
-
-            for enc in ("utf-8-sig", "utf-8", "cp1252", "iso-8859-1"):
+            for enc in ("utf-8-sig", "utf-8", "cp1252"):
                 try:
-                    pandas_df = _clean_columns(_read_ticket_csv_comma(uploaded_file, enc))
-                    pandas_score = _ticket_df_quality_score(pandas_df)
-
-                    if _ticket_csv_parse_is_valid(pandas_df):
-                        return pandas_df
-
-                    promoted_df = _promote_ticket_header(pandas_df)
-                    promoted_score = _ticket_df_quality_score(promoted_df)
-
-                    if _ticket_csv_parse_is_valid(promoted_df):
-                        return promoted_df
-
-                    candidate_df, candidate_score = (
-                        (promoted_df, promoted_score)
-                        if promoted_score > pandas_score
-                        else (pandas_df, pandas_score)
-                    )
-
-                    if candidate_score > best_score:
-                        best_df = candidate_df
-                        best_score = candidate_score
+                    return _clean_columns(_read_ticket_csv_comma(uploaded_file, enc))
                 except Exception:
-                    pass
-
-                try:
-                    manual_df = _clean_columns(_read_ticket_csv_comma_manual(uploaded_file, enc))
-                    manual_score = _ticket_df_quality_score(manual_df)
-
-                    if _ticket_csv_parse_is_valid(manual_df):
-                        return manual_df
-
-                    promoted_manual_df = _promote_ticket_header(manual_df)
-                    promoted_manual_score = _ticket_df_quality_score(promoted_manual_df)
-
-                    if _ticket_csv_parse_is_valid(promoted_manual_df):
-                        return promoted_manual_df
-
-                    candidate_df, candidate_score = (
-                        (promoted_manual_df, promoted_manual_score)
-                        if promoted_manual_score > manual_score
-                        else (manual_df, manual_score)
-                    )
-
-                    if candidate_score > best_score:
-                        best_df = candidate_df
-                        best_score = candidate_score
-                except Exception:
-                    pass
-
-            if not best_df.empty:
-                return best_df
+                    continue
 
             st.error(
                 f"CSV Tiket Detail gagal dibaca: {uploaded_file.name}. "
                 "Pastikan file CSV valid dengan delimiter koma (,)."
+            )
+            return pd.DataFrame()
+
+        return _clean_columns(_read_any(uploaded_file))
+
+    except Exception as e:
+        st.error(f"Gagal membaca file Tiket Detail {uploaded_file.name}: {e}")
+        return pd.DataFrame()
+
+
+def _read_any(uploaded_file) -> pd.DataFrame:
+    if not uploaded_file:
+        return pd.DataFrame()
+    name = uploaded_file.name.lower()
+
+    try:
+        if name.endswith(".csv"):
+            for enc in ("utf-8-sig", "utf-8", "cp1252", "iso-8859-1"):
+                try:
+                    uploaded_file.seek(0)
+                    return pd.read_csv(
+                        uploaded_file,
+                        encoding=enc,
+                        sep=None,
+                        engine="python",
+                        dtype=str,
+                        na_filter=False,
+                    )
+                except Exception:
+                    continue
+            st.error(f"CSV gagal dibaca: {uploaded_file.name}. Simpan ulang sebagai UTF-8.")
+            return pd.DataFrame()
+
+        if name.endswith((".xlsx", ".xlsm", ".xltx", ".xltm")):
+            uploaded_file.seek(0)
+            return pd.read_excel(uploaded_file, engine="openpyxl")
+
+        if name.endswith(".xls"):
+            try:
+                uploaded_file.seek(0)
+                return pd.read_excel(uploaded_file, engine="xlrd")
+            except Exception:
+                pass
+            try:
+                uploaded_file.seek(0)
+                raw = uploaded_file.read()
+                from pyexcel_xls import get_data  # type: ignore
+
+                book = get_data(io.BytesIO(raw))
+                for _sh, rows in book.items():
+                    if not rows:
+                        continue
+                    header = [str(x).strip() if x is not None else "" for x in rows[0]]
+                    body = rows[1:] if len(rows) > 1 else []
+                    return pd.DataFrame(body, columns=header)
+            except Exception:
+                pass
+            try:
+                uploaded_file.seek(0)
+                return pd.read_excel(uploaded_file, engine="openpyxl")
+            except Exception:
+                st.error("Gagal membaca file .xls. Pasang 'xlrd' atau 'pyexcel-xls', atau simpan ulang ke .xlsx.")
+                return pd.DataFrame()
+
+        uploaded_file.seek(0)
+        return pd.read_excel(uploaded_file)
+
+    except ImportError:
+        st.error("Dukungan .xls perlu paket 'xlrd' atau 'pyexcel-xls'. Tambahkan di requirements.txt.")
+        return pd.DataFrame()
+    except Exception as e:
+        st.error(f"Gagal membaca {uploaded_file.name}: {e}")
+        return pd.DataFrame()
+
+
+def _clean_columns(df: pd.DataFrame) -> pd.DataFrame:
+    if df is None or df.empty:
+        return df
+    df.columns = [str(c).strip().lstrip("\ufeff") for c in df.columns]
+    return df
+
+
+def _read_csv_with_sep(uploaded_file, enc: str, sep) -> pd.DataFrame:
+    uploaded_file.seek(0)
+    return pd.read_csv(
+        uploaded_file,
+        encoding=enc,
+        sep=sep,
+        engine="python",
+        dtype=str,
+        na_filter=False,
+    )
+
+
+def _looks_split_ok(df: pd.DataFrame) -> bool:
+    if df is None or df.empty:
+        return False
+    if df.shape[1] > 1:
+        return True
+    if len(df.columns) != 1:
+        return False
+
+    col0 = str(df.columns[0]).strip().lower()
+    hints = (
+        "action",
+        "action date",
+        "created",
+        "tarif",
+        "bank",
+        "st bayar",
+        "status bayar",
+        "order id",
+        "payment",
+        "type",
+        "channel",
+    )
+    return any(h in col0 for h in hints)
+
+
+def _read_tiket_detail_any(uploaded_file) -> pd.DataFrame:
+    if not uploaded_file:
+        return pd.DataFrame()
+
+    name = uploaded_file.name.lower()
+
+    try:
+        if name.endswith(".csv"):
+            encodings = ("utf-8-sig", "utf-8", "cp1252", "iso-8859-1")
+            separators = (",", ";", "\t", "|", None)
+
+            for enc in encodings:
+                for sep in separators:
+                    try:
+                        df = _clean_columns(_read_csv_with_sep(uploaded_file, enc, sep))
+                        if _looks_split_ok(df):
+                            return df
+                    except Exception:
+                        continue
+
+            st.error(
+                f"CSV Tiket Detail gagal dipisahkan otomatis: {uploaded_file.name}. "
+                "Pastikan file tetap CSV valid dengan delimiter koma (,), titik koma (;), tab, atau pipe (|)."
             )
             return pd.DataFrame()
 
@@ -1000,9 +600,8 @@ def _adjust_created_cutoff(dt: pd.Series, tz_mode: str) -> pd.Series:
     return adjusted
 
 
-
 def _parse_ticket_created_series(sr: pd.Series, tz_mode: str = "WIB") -> pd.Series:
-    raw = sr.fillna("").astype(str).map(_strip_outer_quotes).str.strip()
+    raw = sr.fillna("").astype(str).str.strip()
     dt = pd.to_datetime(raw, format="%d/%m/%Y %H:%M", errors="coerce")
     missing = dt.isna() & raw.ne("")
 
@@ -1310,7 +909,7 @@ if go:
         if tiket_df["__ticket_date__"].notna().any():
             t_date_action = "__ticket_date__"
 
-    t_amt_tarif = _resolve_ticket_tarif_col(tiket_df)
+    t_amt_tarif = _find_col(tiket_df, ["Tarif", "tarif"])
     if t_amt_tarif is None:
         st.error("Kolom nominal 'Tarif' tidak ditemukan pada Tiket Detail.")
         st.stop()
@@ -1348,21 +947,23 @@ if go:
 
     # ------------------  TABEL 1: TIKET DETAIL ESPAY (PAID ONLY) -------------------
     td = tiket_df.copy()
-    if t_date_action != "__ticket_date__" and t_created is not None and t_date_action != t_created:
-        td = _fill_action_from_created(td, t_date_action, t_created)
+    if t_date_action == "__ticket_date__":
+        td[t_date_action] = pd.to_datetime(td[t_date_action], errors="coerce")
+    else:
+        if t_created is not None and t_date_action != t_created:
+            td = _fill_action_from_created(td, t_date_action, t_created)
+        td[t_date_action] = pd.to_datetime(td[t_date_action].apply(_to_date), errors="coerce")
+    td = td[~td[t_date_action].isna()]
 
-    td["__ticket_date_calc__"] = _ensure_datetime_series(td[t_date_action])
-    td = td[~td["__ticket_date_calc__"].isna()]
-
-    td_bank_norm = _first_series(td[t_bank]).apply(_norm_str)
-    td_stat_norm = _first_series(td[t_stat]).apply(_norm_str)
+    td_bank_norm = td[t_bank].apply(_norm_str)
+    td_stat_norm = td[t_stat].apply(_norm_str)
     td = td[td_bank_norm.eq("espay") & td_stat_norm.eq("paid")]
-    td = td[(td["__ticket_date_calc__"] >= month_start) & (td["__ticket_date_calc__"] <= month_end)]
+    td = td[(td[t_date_action] >= month_start) & (td[t_date_action] <= month_end)]
 
     td[t_amt_tarif] = _to_num(td[t_amt_tarif])
 
     # FIX: ABAIKAN DUPLICATE UNTUK TIKET DETAIL (jangan drop_duplicates)
-    tiket_by_date = td.groupby(td["__ticket_date_calc__"].dt.date, dropna=True)[t_amt_tarif].sum()
+    tiket_by_date = td.groupby(td[t_date_action].dt.date, dropna=True)[t_amt_tarif].sum()
 
     # ------------------  Settlement Dana (utama/legacy) ------------------
     sd_main = settle_df.copy()
@@ -1553,7 +1154,7 @@ if go:
         or _col_by_letter_local(tiket_df, "J")
     )
     date_col = "__ticket_date__" if "__ticket_date__" in tiket_df.columns else (_find_ticket_date_col(tiket_df) or _col_by_letter_local(tiket_df, "AG"))
-    tarif_col = _resolve_ticket_tarif_col(tiket_df) or _col_by_letter_local(tiket_df, "Y")
+    tarif_col = _find_col(tiket_df, ["Tarif", "tarif"]) or _col_by_letter_local(tiket_df, "Y")
     status_col = _find_col(tiket_df, ["St Bayar", "Status Bayar", "status", "status bayar"])
 
     required_missing = [
@@ -1573,14 +1174,16 @@ if go:
         st.warning("Kolom wajib untuk tabel 'Detail Tiket (GO SHOW/ONLINE) [PAID]' belum lengkap: " + ", ".join(required_missing))
     else:
         tix = tiket_df.copy()
-        if date_col != "__ticket_date__" and t_created is not None and date_col != t_created:
-            tix = _fill_action_from_created(tix, date_col, t_created)
+        if date_col == "__ticket_date__":
+            tix[date_col] = pd.to_datetime(tix[date_col], errors="coerce")
+        else:
+            if t_created is not None and date_col != t_created:
+                tix = _fill_action_from_created(tix, date_col, t_created)
+            tix[date_col] = pd.to_datetime(tix[date_col].apply(_to_date), errors="coerce")
+        tix = tix[~tix[date_col].isna()]
+        tix = tix[(tix[date_col] >= month_start) & (tix[date_col] <= month_end)]
 
-        tix["__ticket_date_calc__"] = _ensure_datetime_series(tix[date_col])
-        tix = tix[~tix["__ticket_date_calc__"].isna()]
-        tix = tix[(tix["__ticket_date_calc__"] >= month_start) & (tix["__ticket_date_calc__"] <= month_end)]
-
-        stat_norm = _first_series(tix[status_col]).apply(_norm_str)
+        stat_norm = tix[status_col].apply(_norm_str)
         tix = tix[stat_norm.eq("paid") | stat_norm.str.contains(r"\bpaid\b", na=False)]
 
         main_norm_all = tix[type_main_col].apply(_norm_str)
@@ -1603,23 +1206,23 @@ if go:
         idx2 = pd.Index(pd.date_range(month_start, month_end, freq="D").date, name="Tanggal")
 
         # ---------------- GO SHOW existing ----------------
-        s_gs_prepaid_bca = tix.loc[m_go_show & m_prepaid_all & bank_norm_all.eq("bca")].groupby(tix["__ticket_date_calc__"].dt.date, dropna=True)[tarif_col].sum()
-        s_gs_prepaid_bri = tix.loc[m_go_show & m_prepaid_all & bank_norm_all.eq("bri")].groupby(tix["__ticket_date_calc__"].dt.date, dropna=True)[tarif_col].sum()
-        s_gs_prepaid_bni = tix.loc[m_go_show & m_prepaid_all & bank_norm_all.eq("bni")].groupby(tix["__ticket_date_calc__"].dt.date, dropna=True)[tarif_col].sum()
-        s_gs_prepaid_mandiri = tix.loc[m_go_show & m_prepaid_all & bank_norm_all.eq("mandiri")].groupby(tix["__ticket_date_calc__"].dt.date, dropna=True)[tarif_col].sum()
-        s_gs_emoney_espay = tix.loc[m_go_show & m_emoney_all & bank_norm_all.eq("espay")].groupby(tix["__ticket_date_calc__"].dt.date, dropna=True)[tarif_col].sum()
-        s_gs_varetail_espay = tix.loc[m_go_show & m_varetail_all & bank_norm_all.eq("espay")].groupby(tix["__ticket_date_calc__"].dt.date, dropna=True)[tarif_col].sum()
-        s_gs_cash_asdp = tix.loc[m_go_show & m_cash_all & bank_norm_all.eq("asdp")].groupby(tix["__ticket_date_calc__"].dt.date, dropna=True)[tarif_col].sum()
+        s_gs_prepaid_bca = tix.loc[m_go_show & m_prepaid_all & bank_norm_all.eq("bca")].groupby(tix[date_col].dt.date, dropna=True)[tarif_col].sum()
+        s_gs_prepaid_bri = tix.loc[m_go_show & m_prepaid_all & bank_norm_all.eq("bri")].groupby(tix[date_col].dt.date, dropna=True)[tarif_col].sum()
+        s_gs_prepaid_bni = tix.loc[m_go_show & m_prepaid_all & bank_norm_all.eq("bni")].groupby(tix[date_col].dt.date, dropna=True)[tarif_col].sum()
+        s_gs_prepaid_mandiri = tix.loc[m_go_show & m_prepaid_all & bank_norm_all.eq("mandiri")].groupby(tix[date_col].dt.date, dropna=True)[tarif_col].sum()
+        s_gs_emoney_espay = tix.loc[m_go_show & m_emoney_all & bank_norm_all.eq("espay")].groupby(tix[date_col].dt.date, dropna=True)[tarif_col].sum()
+        s_gs_varetail_espay = tix.loc[m_go_show & m_varetail_all & bank_norm_all.eq("espay")].groupby(tix[date_col].dt.date, dropna=True)[tarif_col].sum()
+        s_gs_cash_asdp = tix.loc[m_go_show & m_cash_all & bank_norm_all.eq("asdp")].groupby(tix[date_col].dt.date, dropna=True)[tarif_col].sum()
 
         # ---------------- GO SHOW TRANSFER (BARU) ----------------
         # PT.POS variasi: "pt.pos", "pt pos", "ptpos", "pos"
         m_bank_ptpos = bank_norm_all.str.contains(r"\b(pt\.?\s*pos|ptpos|pos)\b", na=False)
 
-        s_gs_tf_ptpos = tix.loc[m_go_show & m_tf_all & m_bank_ptpos].groupby(tix["__ticket_date_calc__"].dt.date, dropna=True)[tarif_col].sum()
-        s_gs_tf_bri = tix.loc[m_go_show & m_tf_all & bank_norm_all.eq("bri")].groupby(tix["__ticket_date_calc__"].dt.date, dropna=True)[tarif_col].sum()
-        s_gs_tf_bni = tix.loc[m_go_show & m_tf_all & bank_norm_all.eq("bni")].groupby(tix["__ticket_date_calc__"].dt.date, dropna=True)[tarif_col].sum()
-        s_gs_tf_mandiri = tix.loc[m_go_show & m_tf_all & bank_norm_all.eq("mandiri")].groupby(tix["__ticket_date_calc__"].dt.date, dropna=True)[tarif_col].sum()
-        s_gs_tf_bca = tix.loc[m_go_show & m_tf_all & bank_norm_all.eq("bca")].groupby(tix["__ticket_date_calc__"].dt.date, dropna=True)[tarif_col].sum()
+        s_gs_tf_ptpos = tix.loc[m_go_show & m_tf_all & m_bank_ptpos].groupby(tix[date_col].dt.date, dropna=True)[tarif_col].sum()
+        s_gs_tf_bri = tix.loc[m_go_show & m_tf_all & bank_norm_all.eq("bri")].groupby(tix[date_col].dt.date, dropna=True)[tarif_col].sum()
+        s_gs_tf_bni = tix.loc[m_go_show & m_tf_all & bank_norm_all.eq("bni")].groupby(tix[date_col].dt.date, dropna=True)[tarif_col].sum()
+        s_gs_tf_mandiri = tix.loc[m_go_show & m_tf_all & bank_norm_all.eq("mandiri")].groupby(tix[date_col].dt.date, dropna=True)[tarif_col].sum()
+        s_gs_tf_bca = tix.loc[m_go_show & m_tf_all & bank_norm_all.eq("bca")].groupby(tix[date_col].dt.date, dropna=True)[tarif_col].sum()
 
         go_show_cols = {
             "PREPAID - BCA": s_gs_prepaid_bca.reindex(idx2, fill_value=0.0),
@@ -1645,9 +1248,9 @@ if go:
         m_cash_on = (sub_norm_all == "cash") | sub_norm_all.str.contains(r"\bcash\b", na=False)
         m_bank_espay_on = bank_norm_all.eq("espay")
 
-        s_on_emoney_espay = tix.loc[m_online & m_bank_espay_on & m_emoney_on].groupby(tix["__ticket_date_calc__"].dt.date, dropna=True)[tarif_col].sum()
-        s_on_varetail_espay = tix.loc[m_online & m_bank_espay_on & m_varetail_on].groupby(tix["__ticket_date_calc__"].dt.date, dropna=True)[tarif_col].sum()
-        s_on_cash_asdp = tix.loc[m_online & m_cash_on & bank_norm_all.eq("asdp")].groupby(tix["__ticket_date_calc__"].dt.date, dropna=True)[tarif_col].sum()
+        s_on_emoney_espay = tix.loc[m_online & m_bank_espay_on & m_emoney_on].groupby(tix[date_col].dt.date, dropna=True)[tarif_col].sum()
+        s_on_varetail_espay = tix.loc[m_online & m_bank_espay_on & m_varetail_on].groupby(tix[date_col].dt.date, dropna=True)[tarif_col].sum()
+        s_on_cash_asdp = tix.loc[m_online & m_cash_on & bank_norm_all.eq("asdp")].groupby(tix[date_col].dt.date, dropna=True)[tarif_col].sum()
 
         online_cols = {
             "E-MONEY - ESPAY": s_on_emoney_espay.reindex(idx2, fill_value=0.0),
@@ -1903,15 +1506,17 @@ if go:
         st.warning("Kolom untuk 'RINCIAN SELISIH' belum lengkap: " + ", ".join(miss_rincian))
     else:
         td_gap = tiket_df.copy()
-        if t_date_action != "__ticket_date__" and t_created is not None and t_date_action != t_created:
-            td_gap = _fill_action_from_created(td_gap, t_date_action, t_created)
+        if t_date_action == "__ticket_date__":
+            td_gap[t_date_action] = pd.to_datetime(td_gap[t_date_action], errors="coerce")
+        else:
+            if t_created is not None and t_date_action != t_created:
+                td_gap = _fill_action_from_created(td_gap, t_date_action, t_created)
+            td_gap[t_date_action] = pd.to_datetime(td_gap[t_date_action].apply(_to_date), errors="coerce")
+        td_gap = td_gap[~td_gap[t_date_action].isna()]
+        td_gap = td_gap[(td_gap[t_date_action] >= month_start) & (td_gap[t_date_action] <= month_end)]
 
-        td_gap["__ticket_date_calc__"] = _ensure_datetime_series(td_gap[t_date_action])
-        td_gap = td_gap[~td_gap["__ticket_date_calc__"].isna()]
-        td_gap = td_gap[(td_gap["__ticket_date_calc__"] >= month_start) & (td_gap["__ticket_date_calc__"] <= month_end)]
-
-        bank_mask = _first_series(td_gap[t_bank]).apply(_norm_str).str.contains("espay", na=False)
-        paid_mask = _first_series(td_gap[t_stat]).apply(_norm_str).eq("paid")
+        bank_mask = td_gap[t_bank].apply(_norm_str).str.contains("espay", na=False)
+        paid_mask = td_gap[t_stat].apply(_norm_str).eq("paid")
         td_gap = td_gap[bank_mask & paid_mask].copy()
 
         td_gap[t_amt_tarif] = _to_num(td_gap[t_amt_tarif])
