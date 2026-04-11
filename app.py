@@ -810,6 +810,56 @@ def _month_selector() -> Tuple[int, int]:
     return year, month
 
 
+def _flatten_export_df(df: pd.DataFrame) -> pd.DataFrame:
+    if df is None or getattr(df, "empty", True):
+        return pd.DataFrame()
+
+    out = df.copy()
+    if isinstance(out.columns, pd.MultiIndex):
+        flat_cols = []
+        for col in out.columns:
+            parts = [str(x).strip() for x in col if str(x).strip()]
+            flat_cols.append(" | ".join(parts) if parts else "")
+        out.columns = flat_cols
+    else:
+        out.columns = [str(c) for c in out.columns]
+    return out
+
+
+def _build_combined_excel_bytes(
+    rekon_df: Optional[pd.DataFrame],
+    detail_tiket_df: Optional[pd.DataFrame],
+    detail_settlement_df: Optional[pd.DataFrame],
+    rincian_selisih_df: Optional[pd.DataFrame],
+) -> bytes:
+    bio_all = io.BytesIO()
+    with pd.ExcelWriter(bio_all, engine="openpyxl") as xw_all:
+        has_sheet = False
+
+        if rekon_df is not None and not getattr(rekon_df, "empty", True):
+            _flatten_export_df(rekon_df).to_excel(xw_all, index=False, sheet_name="Rekonsiliasi")
+            has_sheet = True
+
+        if detail_tiket_df is not None and not getattr(detail_tiket_df, "empty", True):
+            _flatten_export_df(detail_tiket_df).to_excel(xw_all, index=False, sheet_name="Detail_Tiket")
+            has_sheet = True
+
+        if detail_settlement_df is not None and not getattr(detail_settlement_df, "empty", True):
+            _flatten_export_df(detail_settlement_df).to_excel(xw_all, index=False, sheet_name="Detail_Settlement")
+            has_sheet = True
+
+        if rincian_selisih_df is not None and not getattr(rincian_selisih_df, "empty", True):
+            _flatten_export_df(rincian_selisih_df).to_excel(xw_all, index=False, sheet_name="Rincian_Selisih")
+            has_sheet = True
+
+        if not has_sheet:
+            pd.DataFrame({"Info": ["Tidak ada data untuk diunduh"]}).to_excel(
+                xw_all, index=False, sheet_name="Info"
+            )
+
+    return bio_all.getvalue()
+
+
 # ---------- App ----------
 
 st.set_page_config(page_title="Rekonsiliasi Tiket vs Settlement", layout="wide")
@@ -1610,33 +1660,44 @@ if go:
 
     periode = f"{y}-{m:02d}"
     zona_waktu = ticket_tz_mode
-    st.session_state["HASIL"]["rekon"] = {"periode": periode, "zona_waktu": zona_waktu, "table": fmt, "excel_bytes": bio.getvalue()}
+    gabungan_excel_bytes = _build_combined_excel_bytes(
+        rekon_df=fmt,
+        detail_tiket_df=df2_fmt_mi,
+        detail_settlement_df=detail_settle_table,
+        rincian_selisih_df=rincian_selisih_table,
+    )
+
+    st.session_state["HASIL"]["rekon"] = {"periode": periode, "zona_waktu": zona_waktu, "table": fmt}
     if df2_fmt_mi is not None:
         st.session_state["HASIL"]["detail_tiket"] = {"periode": periode, "zona_waktu": zona_waktu, "table": df2_fmt_mi}
     else:
         st.session_state["HASIL"].pop("detail_tiket", None)
 
-    if detail_settle_table is not None and detail_settle_excel_bytes is not None:
+    if detail_settle_table is not None:
         st.session_state["HASIL"]["detail_settlement"] = {
             "periode": periode,
             "zona_waktu": zona_waktu,
             "table": detail_settle_table,
-            "excel_bytes": detail_settle_excel_bytes,
         }
     else:
         st.session_state["HASIL"].pop("detail_settlement", None)
 
-    if rincian_selisih_table is not None and rincian_selisih_excel_bytes is not None:
+    if rincian_selisih_table is not None:
         st.session_state["HASIL"]["rincian_selisih"] = {
             "periode": periode,
             "zona_waktu": zona_waktu,
             "table": rincian_selisih_table,
-            "excel_bytes": rincian_selisih_excel_bytes,
         }
     else:
         st.session_state["HASIL"].pop("rincian_selisih", None)
 
-    st.success("Proses selesai. Hasil tersimpan (klik download tidak perlu proses ulang).")
+    st.session_state["HASIL"]["download_all"] = {
+        "periode": periode,
+        "zona_waktu": zona_waktu,
+        "excel_bytes": gabungan_excel_bytes,
+    }
+
+    st.success("Proses selesai. File unduhan digabungkan dalam satu Excel.")
 
 
 # =========================
@@ -1645,53 +1706,32 @@ if go:
 
 hasil = st.session_state.get("HASIL", {})
 
-if "rekon" in hasil:
-    st.subheader("Hasil Rekonsiliasi per Tanggal (mengikuti bulan parameter)")
-    st.caption(f"Periode tersimpan: {hasil['rekon']['periode']} | Zona waktu Created: {hasil['rekon'].get('zona_waktu', 'WIB')}")
-    st.dataframe(_style_right(hasil["rekon"]["table"]), use_container_width=True, hide_index=True)
-
+if "download_all" in hasil:
     st.download_button(
-        "Unduh Excel Rekonsiliasi",
-        data=hasil["rekon"]["excel_bytes"],
-        file_name=f"rekonsiliasi_{hasil['rekon']['periode']}.xlsx",
+        "Unduh Excel Gabungan (4 Tabel)",
+        data=hasil["download_all"]["excel_bytes"],
+        file_name=f"rekonsiliasi_gabungan_{hasil['download_all']['periode']}.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         use_container_width=True,
-        key="dl_rekon",
+        key="dl_gabungan",
     )
 
+if "rekon" in hasil:
+    st.subheader("Hasil Rekonsiliasi")
+    st.caption(f"Periode: {hasil['rekon']['periode']} | Zona waktu Created: {hasil['rekon'].get('zona_waktu', 'WIB')}")
+    st.dataframe(_style_right(hasil["rekon"]["table"]), use_container_width=True, hide_index=True)
+
 if "detail_tiket" in hasil:
-    st.subheader("Detail Tiket per Tanggal — TYPE: GO SHOW & ONLINE × SUB-TIPE (J) [HANYA PAID]")
-    st.caption(f"Periode tersimpan: {hasil['detail_tiket']['periode']} | Zona waktu Created: {hasil['detail_tiket'].get('zona_waktu', 'WIB')}")
+    st.subheader("Detail Tiket")
     st.dataframe(_style_right(hasil["detail_tiket"]["table"]), use_container_width=True, hide_index=True)
 
 if "detail_settlement" in hasil:
-    st.subheader("DETAIL SETTLEMENT REPORT")
-    st.caption(f"Periode tersimpan: {hasil['detail_settlement']['periode']} | Zona waktu Created: {hasil['detail_settlement'].get('zona_waktu', 'WIB')}")
+    st.subheader("Detail Settlement")
     st.dataframe(_style_right(hasil["detail_settlement"]["table"]), use_container_width=True, hide_index=True)
 
-    st.download_button(
-        "Unduh Excel (Detail Settlement)",
-        data=hasil["detail_settlement"]["excel_bytes"],
-        file_name=f"detail_settlement_{hasil['detail_settlement']['periode']}.xlsx",
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        use_container_width=True,
-        key="dl_detail_settlement",
-    )
-
-
 if "rincian_selisih" in hasil:
-    st.subheader("RINCIAN SELISIH ORDER ID — Tiket Detail vs Settlement Dana")
-    st.caption(f"Periode tersimpan: {hasil['rincian_selisih']['periode']} | Zona waktu Created: {hasil['rincian_selisih'].get('zona_waktu', 'WIB')}")
+    st.subheader("Rincian Selisih Order ID")
     st.dataframe(_style_right(hasil["rincian_selisih"]["table"]), use_container_width=True, hide_index=True)
-
-    st.download_button(
-        "Unduh Excel (Rincian Selisih)",
-        data=hasil["rincian_selisih"]["excel_bytes"],
-        file_name=f"rincian_selisih_{hasil['rincian_selisih']['periode']}.xlsx",
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        use_container_width=True,
-        key="dl_rincian_selisih",
-    )
 
 if not hasil:
     st.info("Silakan upload file, pilih bulan-tahun, lalu klik **Proses**.")
