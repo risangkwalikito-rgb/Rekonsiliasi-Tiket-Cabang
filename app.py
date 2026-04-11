@@ -64,6 +64,33 @@ def _to_num(sr: pd.Series) -> pd.Series:
     return sr.apply(_parse_money).astype(float)
 
 
+def _first_series(obj) -> pd.Series:
+    if isinstance(obj, pd.DataFrame):
+        if obj.shape[1] == 0:
+            return pd.Series(dtype=object)
+        return obj.iloc[:, 0]
+    return obj
+
+
+def _ensure_datetime_series(sr: pd.Series) -> pd.Series:
+    sr = _first_series(sr)
+    if sr is None:
+        return pd.Series(dtype="datetime64[ns]")
+
+    if pd.api.types.is_datetime64_any_dtype(sr):
+        return pd.to_datetime(sr, errors="coerce")
+
+    raw = sr.astype(str).map(_strip_outer_quotes).str.strip()
+    dt = pd.to_datetime(raw, errors="coerce")
+    missing = dt.isna() & raw.ne("") & raw.ne("nan") & raw.ne("None")
+
+    if missing.any():
+        dt2 = raw[missing].apply(_to_date)
+        dt.loc[missing] = pd.to_datetime(dt2, errors="coerce")
+
+    return pd.to_datetime(dt, errors="coerce")
+
+
 def _norm_str(val) -> str:
     s = "" if val is None else str(val)
     s = unicodedata.normalize("NFKD", s)
@@ -1321,23 +1348,21 @@ if go:
 
     # ------------------  TABEL 1: TIKET DETAIL ESPAY (PAID ONLY) -------------------
     td = tiket_df.copy()
-    if t_date_action == "__ticket_date__":
-        td[t_date_action] = pd.to_datetime(td[t_date_action], errors="coerce")
-    else:
-        if t_created is not None and t_date_action != t_created:
-            td = _fill_action_from_created(td, t_date_action, t_created)
-        td[t_date_action] = pd.to_datetime(td[t_date_action].apply(_to_date), errors="coerce")
-    td = td[~td[t_date_action].isna()]
+    if t_date_action != "__ticket_date__" and t_created is not None and t_date_action != t_created:
+        td = _fill_action_from_created(td, t_date_action, t_created)
 
-    td_bank_norm = td[t_bank].apply(_norm_str)
-    td_stat_norm = td[t_stat].apply(_norm_str)
+    td["__ticket_date_calc__"] = _ensure_datetime_series(td[t_date_action])
+    td = td[~td["__ticket_date_calc__"].isna()]
+
+    td_bank_norm = _first_series(td[t_bank]).apply(_norm_str)
+    td_stat_norm = _first_series(td[t_stat]).apply(_norm_str)
     td = td[td_bank_norm.eq("espay") & td_stat_norm.eq("paid")]
-    td = td[(td[t_date_action] >= month_start) & (td[t_date_action] <= month_end)]
+    td = td[(td["__ticket_date_calc__"] >= month_start) & (td["__ticket_date_calc__"] <= month_end)]
 
     td[t_amt_tarif] = _to_num(td[t_amt_tarif])
 
     # FIX: ABAIKAN DUPLICATE UNTUK TIKET DETAIL (jangan drop_duplicates)
-    tiket_by_date = td.groupby(td[t_date_action].dt.date, dropna=True)[t_amt_tarif].sum()
+    tiket_by_date = td.groupby(td["__ticket_date_calc__"].dt.date, dropna=True)[t_amt_tarif].sum()
 
     # ------------------  Settlement Dana (utama/legacy) ------------------
     sd_main = settle_df.copy()
@@ -1548,16 +1573,14 @@ if go:
         st.warning("Kolom wajib untuk tabel 'Detail Tiket (GO SHOW/ONLINE) [PAID]' belum lengkap: " + ", ".join(required_missing))
     else:
         tix = tiket_df.copy()
-        if date_col == "__ticket_date__":
-            tix[date_col] = pd.to_datetime(tix[date_col], errors="coerce")
-        else:
-            if t_created is not None and date_col != t_created:
-                tix = _fill_action_from_created(tix, date_col, t_created)
-            tix[date_col] = pd.to_datetime(tix[date_col].apply(_to_date), errors="coerce")
-        tix = tix[~tix[date_col].isna()]
-        tix = tix[(tix[date_col] >= month_start) & (tix[date_col] <= month_end)]
+        if date_col != "__ticket_date__" and t_created is not None and date_col != t_created:
+            tix = _fill_action_from_created(tix, date_col, t_created)
 
-        stat_norm = tix[status_col].apply(_norm_str)
+        tix["__ticket_date_calc__"] = _ensure_datetime_series(tix[date_col])
+        tix = tix[~tix["__ticket_date_calc__"].isna()]
+        tix = tix[(tix["__ticket_date_calc__"] >= month_start) & (tix["__ticket_date_calc__"] <= month_end)]
+
+        stat_norm = _first_series(tix[status_col]).apply(_norm_str)
         tix = tix[stat_norm.eq("paid") | stat_norm.str.contains(r"\bpaid\b", na=False)]
 
         main_norm_all = tix[type_main_col].apply(_norm_str)
@@ -1580,23 +1603,23 @@ if go:
         idx2 = pd.Index(pd.date_range(month_start, month_end, freq="D").date, name="Tanggal")
 
         # ---------------- GO SHOW existing ----------------
-        s_gs_prepaid_bca = tix.loc[m_go_show & m_prepaid_all & bank_norm_all.eq("bca")].groupby(tix[date_col].dt.date, dropna=True)[tarif_col].sum()
-        s_gs_prepaid_bri = tix.loc[m_go_show & m_prepaid_all & bank_norm_all.eq("bri")].groupby(tix[date_col].dt.date, dropna=True)[tarif_col].sum()
-        s_gs_prepaid_bni = tix.loc[m_go_show & m_prepaid_all & bank_norm_all.eq("bni")].groupby(tix[date_col].dt.date, dropna=True)[tarif_col].sum()
-        s_gs_prepaid_mandiri = tix.loc[m_go_show & m_prepaid_all & bank_norm_all.eq("mandiri")].groupby(tix[date_col].dt.date, dropna=True)[tarif_col].sum()
-        s_gs_emoney_espay = tix.loc[m_go_show & m_emoney_all & bank_norm_all.eq("espay")].groupby(tix[date_col].dt.date, dropna=True)[tarif_col].sum()
-        s_gs_varetail_espay = tix.loc[m_go_show & m_varetail_all & bank_norm_all.eq("espay")].groupby(tix[date_col].dt.date, dropna=True)[tarif_col].sum()
-        s_gs_cash_asdp = tix.loc[m_go_show & m_cash_all & bank_norm_all.eq("asdp")].groupby(tix[date_col].dt.date, dropna=True)[tarif_col].sum()
+        s_gs_prepaid_bca = tix.loc[m_go_show & m_prepaid_all & bank_norm_all.eq("bca")].groupby(tix["__ticket_date_calc__"].dt.date, dropna=True)[tarif_col].sum()
+        s_gs_prepaid_bri = tix.loc[m_go_show & m_prepaid_all & bank_norm_all.eq("bri")].groupby(tix["__ticket_date_calc__"].dt.date, dropna=True)[tarif_col].sum()
+        s_gs_prepaid_bni = tix.loc[m_go_show & m_prepaid_all & bank_norm_all.eq("bni")].groupby(tix["__ticket_date_calc__"].dt.date, dropna=True)[tarif_col].sum()
+        s_gs_prepaid_mandiri = tix.loc[m_go_show & m_prepaid_all & bank_norm_all.eq("mandiri")].groupby(tix["__ticket_date_calc__"].dt.date, dropna=True)[tarif_col].sum()
+        s_gs_emoney_espay = tix.loc[m_go_show & m_emoney_all & bank_norm_all.eq("espay")].groupby(tix["__ticket_date_calc__"].dt.date, dropna=True)[tarif_col].sum()
+        s_gs_varetail_espay = tix.loc[m_go_show & m_varetail_all & bank_norm_all.eq("espay")].groupby(tix["__ticket_date_calc__"].dt.date, dropna=True)[tarif_col].sum()
+        s_gs_cash_asdp = tix.loc[m_go_show & m_cash_all & bank_norm_all.eq("asdp")].groupby(tix["__ticket_date_calc__"].dt.date, dropna=True)[tarif_col].sum()
 
         # ---------------- GO SHOW TRANSFER (BARU) ----------------
         # PT.POS variasi: "pt.pos", "pt pos", "ptpos", "pos"
         m_bank_ptpos = bank_norm_all.str.contains(r"\b(pt\.?\s*pos|ptpos|pos)\b", na=False)
 
-        s_gs_tf_ptpos = tix.loc[m_go_show & m_tf_all & m_bank_ptpos].groupby(tix[date_col].dt.date, dropna=True)[tarif_col].sum()
-        s_gs_tf_bri = tix.loc[m_go_show & m_tf_all & bank_norm_all.eq("bri")].groupby(tix[date_col].dt.date, dropna=True)[tarif_col].sum()
-        s_gs_tf_bni = tix.loc[m_go_show & m_tf_all & bank_norm_all.eq("bni")].groupby(tix[date_col].dt.date, dropna=True)[tarif_col].sum()
-        s_gs_tf_mandiri = tix.loc[m_go_show & m_tf_all & bank_norm_all.eq("mandiri")].groupby(tix[date_col].dt.date, dropna=True)[tarif_col].sum()
-        s_gs_tf_bca = tix.loc[m_go_show & m_tf_all & bank_norm_all.eq("bca")].groupby(tix[date_col].dt.date, dropna=True)[tarif_col].sum()
+        s_gs_tf_ptpos = tix.loc[m_go_show & m_tf_all & m_bank_ptpos].groupby(tix["__ticket_date_calc__"].dt.date, dropna=True)[tarif_col].sum()
+        s_gs_tf_bri = tix.loc[m_go_show & m_tf_all & bank_norm_all.eq("bri")].groupby(tix["__ticket_date_calc__"].dt.date, dropna=True)[tarif_col].sum()
+        s_gs_tf_bni = tix.loc[m_go_show & m_tf_all & bank_norm_all.eq("bni")].groupby(tix["__ticket_date_calc__"].dt.date, dropna=True)[tarif_col].sum()
+        s_gs_tf_mandiri = tix.loc[m_go_show & m_tf_all & bank_norm_all.eq("mandiri")].groupby(tix["__ticket_date_calc__"].dt.date, dropna=True)[tarif_col].sum()
+        s_gs_tf_bca = tix.loc[m_go_show & m_tf_all & bank_norm_all.eq("bca")].groupby(tix["__ticket_date_calc__"].dt.date, dropna=True)[tarif_col].sum()
 
         go_show_cols = {
             "PREPAID - BCA": s_gs_prepaid_bca.reindex(idx2, fill_value=0.0),
@@ -1622,9 +1645,9 @@ if go:
         m_cash_on = (sub_norm_all == "cash") | sub_norm_all.str.contains(r"\bcash\b", na=False)
         m_bank_espay_on = bank_norm_all.eq("espay")
 
-        s_on_emoney_espay = tix.loc[m_online & m_bank_espay_on & m_emoney_on].groupby(tix[date_col].dt.date, dropna=True)[tarif_col].sum()
-        s_on_varetail_espay = tix.loc[m_online & m_bank_espay_on & m_varetail_on].groupby(tix[date_col].dt.date, dropna=True)[tarif_col].sum()
-        s_on_cash_asdp = tix.loc[m_online & m_cash_on & bank_norm_all.eq("asdp")].groupby(tix[date_col].dt.date, dropna=True)[tarif_col].sum()
+        s_on_emoney_espay = tix.loc[m_online & m_bank_espay_on & m_emoney_on].groupby(tix["__ticket_date_calc__"].dt.date, dropna=True)[tarif_col].sum()
+        s_on_varetail_espay = tix.loc[m_online & m_bank_espay_on & m_varetail_on].groupby(tix["__ticket_date_calc__"].dt.date, dropna=True)[tarif_col].sum()
+        s_on_cash_asdp = tix.loc[m_online & m_cash_on & bank_norm_all.eq("asdp")].groupby(tix["__ticket_date_calc__"].dt.date, dropna=True)[tarif_col].sum()
 
         online_cols = {
             "E-MONEY - ESPAY": s_on_emoney_espay.reindex(idx2, fill_value=0.0),
@@ -1880,17 +1903,15 @@ if go:
         st.warning("Kolom untuk 'RINCIAN SELISIH' belum lengkap: " + ", ".join(miss_rincian))
     else:
         td_gap = tiket_df.copy()
-        if t_date_action == "__ticket_date__":
-            td_gap[t_date_action] = pd.to_datetime(td_gap[t_date_action], errors="coerce")
-        else:
-            if t_created is not None and t_date_action != t_created:
-                td_gap = _fill_action_from_created(td_gap, t_date_action, t_created)
-            td_gap[t_date_action] = pd.to_datetime(td_gap[t_date_action].apply(_to_date), errors="coerce")
-        td_gap = td_gap[~td_gap[t_date_action].isna()]
-        td_gap = td_gap[(td_gap[t_date_action] >= month_start) & (td_gap[t_date_action] <= month_end)]
+        if t_date_action != "__ticket_date__" and t_created is not None and t_date_action != t_created:
+            td_gap = _fill_action_from_created(td_gap, t_date_action, t_created)
 
-        bank_mask = td_gap[t_bank].apply(_norm_str).str.contains("espay", na=False)
-        paid_mask = td_gap[t_stat].apply(_norm_str).eq("paid")
+        td_gap["__ticket_date_calc__"] = _ensure_datetime_series(td_gap[t_date_action])
+        td_gap = td_gap[~td_gap["__ticket_date_calc__"].isna()]
+        td_gap = td_gap[(td_gap["__ticket_date_calc__"] >= month_start) & (td_gap["__ticket_date_calc__"] <= month_end)]
+
+        bank_mask = _first_series(td_gap[t_bank]).apply(_norm_str).str.contains("espay", na=False)
+        paid_mask = _first_series(td_gap[t_stat]).apply(_norm_str).eq("paid")
         td_gap = td_gap[bank_mask & paid_mask].copy()
 
         td_gap[t_amt_tarif] = _to_num(td_gap[t_amt_tarif])
