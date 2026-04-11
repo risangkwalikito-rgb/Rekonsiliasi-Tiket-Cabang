@@ -64,6 +64,15 @@ def _norm_str(val) -> str:
 
 
 
+
+def _strip_outer_quotes(val):
+    if val is None:
+        return val
+    s = str(val).strip()
+    if len(s) >= 2 and s[0] == s[-1] and s[0] in {'"', "'"}:
+        s = s[1:-1].strip()
+    return s
+
 def _is_bca_va_product(prod_val) -> bool:
     """Return True for BCA Virtual Account products (incl. blu variants).
 
@@ -303,11 +312,19 @@ def _read_any(uploaded_file) -> pd.DataFrame:
         return pd.DataFrame()
 
 
+
 def _clean_columns(df: pd.DataFrame) -> pd.DataFrame:
     if df is None or df.empty:
         return df
-    df.columns = [str(c).strip().lstrip("\ufeff") for c in df.columns]
-    return df
+
+    out = df.copy()
+    out.columns = [_strip_outer_quotes(str(c).strip().lstrip("\ufeff")) for c in out.columns]
+
+    for c in out.columns:
+        if out[c].dtype == object:
+            out[c] = out[c].map(_strip_outer_quotes)
+
+    return out
 
 
 def _read_csv_with_sep(uploaded_file, enc: str, sep, engine: Optional[str] = "python") -> pd.DataFrame:
@@ -344,10 +361,11 @@ def _decode_uploaded_text(uploaded_file, enc: str) -> str:
     return raw.decode(enc, errors="replace")
 
 
+
 def _rows_to_dataframe(rows: List[List[str]]) -> pd.DataFrame:
     clean_rows: List[List[str]] = []
     for row in rows:
-        vals = ["" if v is None else str(v) for v in row]
+        vals = [_strip_outer_quotes("" if v is None else str(v)) for v in row]
         if any(v.strip() for v in vals):
             clean_rows.append(vals)
 
@@ -378,6 +396,42 @@ def _ticket_header_markers() -> Tuple[str, ...]:
     )
 
 
+
+def _ticket_sample_value_score(df: pd.DataFrame) -> Tuple[int, int, int]:
+    if df is None or df.empty:
+        return (0, 0, 0)
+
+    sample_rows = min(200, len(df))
+
+    created_col = _find_col(df, ["Created", "Created Date", "Created At", "Created Time"])
+    tarif_col = _find_col(df, ["Tarif", "tarif"])
+    bank_col = _find_col(df, ["Bank", "Payment Channel", "channel", "payment method"])
+    status_col = _find_col(df, ["St Bayar", "Status Bayar", "status", "status bayar"])
+
+    created_ok = 0
+    if created_col is not None:
+        raw = df[created_col].head(sample_rows).fillna("").astype(str).map(_strip_outer_quotes).str.strip()
+        dt = pd.to_datetime(raw, format="%d/%m/%Y %H:%M", errors="coerce")
+        missing = dt.isna() & raw.ne("")
+        if missing.any():
+            dt2 = pd.to_datetime(raw[missing], format="%d/%m/%Y %H:%M:%S", errors="coerce")
+            dt.loc[missing] = dt2
+        created_ok = int(dt.notna().sum())
+
+    tarif_ok = 0
+    if tarif_col is not None:
+        raw_tarif = df[tarif_col].head(sample_rows).fillna("").astype(str).map(_strip_outer_quotes).str.strip()
+        parsed_tarif = raw_tarif.apply(_parse_money)
+        tarif_ok = int(((raw_tarif.ne("")) & (parsed_tarif != 0)).sum())
+
+    filter_ok = 0
+    if bank_col is not None and status_col is not None:
+        bank_norm = df[bank_col].head(sample_rows).apply(_norm_str)
+        status_norm = df[status_col].head(sample_rows).apply(_norm_str)
+        filter_ok = int((bank_norm.eq("espay") & status_norm.eq("paid")).sum())
+
+    return (created_ok, tarif_ok, filter_ok)
+
 def _ticket_header_score(values) -> int:
     markers = _ticket_header_markers()
     norm_vals = [_norm_str(v) for v in values if str(v).strip()]
@@ -388,31 +442,40 @@ def _ticket_header_score(values) -> int:
     return score
 
 
+
 def _promote_ticket_header(df: pd.DataFrame, scan_max: int = 20) -> pd.DataFrame:
     if df is None or df.empty:
         return df
 
+    df = _clean_columns(df)
+    current_required = _ticket_required_col_count(df)
     current_score = _ticket_header_score(df.columns)
-    if current_score >= 4:
-        return _clean_columns(df)
+
+    if current_required >= 3 or current_score >= 4:
+        return df
 
     best_row = None
     best_score = current_score
 
     for r in range(min(scan_max, len(df))):
-        row_vals = df.iloc[r].tolist()
+        row_vals = [_strip_outer_quotes(x) for x in df.iloc[r].tolist()]
         score = _ticket_header_score(row_vals)
         if score > best_score:
             best_score = score
             best_row = r
 
     if best_row is None or best_score < 4:
-        return _clean_columns(df)
+        return df
 
-    cols = [str(x).strip() for x in df.iloc[best_row].tolist()]
+    cols = [_strip_outer_quotes(str(x).strip()) for x in df.iloc[best_row].tolist()]
     out = df.iloc[best_row + 1 :].copy()
     out.columns = cols
-    return _clean_columns(out)
+    out = _clean_columns(out)
+
+    if _ticket_required_col_count(out) >= max(current_required, 3):
+        return out
+
+    return df
 
 
 def _ticket_required_col_count(df: pd.DataFrame) -> int:
@@ -433,9 +496,10 @@ def _ticket_required_col_count(df: pd.DataFrame) -> int:
     return found
 
 
-def _ticket_df_quality_score(df: pd.DataFrame) -> Tuple[int, int, int, int]:
+
+def _ticket_df_quality_score(df: pd.DataFrame) -> Tuple[int, int, int, int, int, int, int]:
     if df is None or df.empty:
-        return (-1, -1, -1, -1)
+        return (-1, -1, -1, -1, -1, -1, -1)
 
     required_count = _ticket_required_col_count(df)
     header_score = _ticket_header_score(df.columns)
@@ -456,18 +520,36 @@ def _ticket_df_quality_score(df: pd.DataFrame) -> Tuple[int, int, int, int]:
         if any(marker in _norm_str(v) for v in sampled_cells):
             data_hint_score += 1
 
-    return (required_count, header_score, width, data_hint_score)
+    created_ok, tarif_ok, filter_ok = _ticket_sample_value_score(df)
+
+    return (
+        required_count,
+        created_ok,
+        tarif_ok,
+        filter_ok,
+        header_score,
+        width,
+        data_hint_score,
+    )
+
 
 
 def _ticket_csv_parse_is_valid(df: pd.DataFrame) -> bool:
     if df is None or df.empty:
         return False
-    required_count, header_score, width, _ = _ticket_df_quality_score(df)
+
+    required_count, created_ok, tarif_ok, filter_ok, header_score, width, _ = _ticket_df_quality_score(df)
+
     if width <= 1:
         return False
-    if required_count >= 4:
+
+    if required_count >= 4 and (created_ok > 0 or tarif_ok > 0):
         return True
-    return required_count >= 3 and header_score >= 4
+
+    if required_count >= 3 and created_ok > 0 and tarif_ok > 0:
+        return True
+
+    return required_count >= 3 and header_score >= 4 and (created_ok > 0 or filter_ok > 0)
 
 
 def _ticket_csv_parse_is_suspicious(df: pd.DataFrame) -> bool:
@@ -565,6 +647,7 @@ def _read_csv_with_sep(uploaded_file, enc: str, sep, engine: Optional[str] = "py
     return pd.read_csv(uploaded_file, **kwargs)
 
 
+
 def _read_tiket_detail_any(uploaded_file) -> pd.DataFrame:
     if not uploaded_file:
         return pd.DataFrame()
@@ -574,32 +657,56 @@ def _read_tiket_detail_any(uploaded_file) -> pd.DataFrame:
     try:
         if name.endswith(".csv"):
             best_df = pd.DataFrame()
-            best_score = (-1, -1, -1, -1)
+            best_score = (-1, -1, -1, -1, -1, -1, -1)
 
             for enc in ("utf-8-sig", "utf-8", "cp1252", "iso-8859-1"):
                 try:
-                    pandas_df = _promote_ticket_header(_clean_columns(_read_ticket_csv_comma(uploaded_file, enc)))
+                    pandas_df = _clean_columns(_read_ticket_csv_comma(uploaded_file, enc))
                     pandas_score = _ticket_df_quality_score(pandas_df)
 
                     if _ticket_csv_parse_is_valid(pandas_df):
                         return pandas_df
 
-                    if pandas_score > best_score:
-                        best_df = pandas_df
-                        best_score = pandas_score
+                    promoted_df = _promote_ticket_header(pandas_df)
+                    promoted_score = _ticket_df_quality_score(promoted_df)
+
+                    if _ticket_csv_parse_is_valid(promoted_df):
+                        return promoted_df
+
+                    candidate_df, candidate_score = (
+                        (promoted_df, promoted_score)
+                        if promoted_score > pandas_score
+                        else (pandas_df, pandas_score)
+                    )
+
+                    if candidate_score > best_score:
+                        best_df = candidate_df
+                        best_score = candidate_score
                 except Exception:
                     pass
 
                 try:
-                    manual_df = _promote_ticket_header(_clean_columns(_read_ticket_csv_comma_manual(uploaded_file, enc)))
+                    manual_df = _clean_columns(_read_ticket_csv_comma_manual(uploaded_file, enc))
                     manual_score = _ticket_df_quality_score(manual_df)
 
                     if _ticket_csv_parse_is_valid(manual_df):
                         return manual_df
 
-                    if manual_score > best_score:
-                        best_df = manual_df
-                        best_score = manual_score
+                    promoted_manual_df = _promote_ticket_header(manual_df)
+                    promoted_manual_score = _ticket_df_quality_score(promoted_manual_df)
+
+                    if _ticket_csv_parse_is_valid(promoted_manual_df):
+                        return promoted_manual_df
+
+                    candidate_df, candidate_score = (
+                        (promoted_manual_df, promoted_manual_score)
+                        if promoted_manual_score > manual_score
+                        else (manual_df, manual_score)
+                    )
+
+                    if candidate_score > best_score:
+                        best_df = candidate_df
+                        best_score = candidate_score
                 except Exception:
                     pass
 
@@ -716,8 +823,9 @@ def _adjust_created_cutoff(dt: pd.Series, tz_mode: str) -> pd.Series:
     return adjusted
 
 
+
 def _parse_ticket_created_series(sr: pd.Series, tz_mode: str = "WIB") -> pd.Series:
-    raw = sr.fillna("").astype(str).str.strip()
+    raw = sr.fillna("").astype(str).map(_strip_outer_quotes).str.strip()
     dt = pd.to_datetime(raw, format="%d/%m/%Y %H:%M", errors="coerce")
     missing = dt.isna() & raw.ne("")
 
