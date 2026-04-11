@@ -59,7 +59,7 @@ def _to_num(sr: pd.Series) -> pd.Series:
         sr = sr.iloc[:, 0]
 
     if pd.api.types.is_datetime64_any_dtype(sr):
-        raise TypeError("Kolom nominal terbaca sebagai datetime, bukan angka.")
+        sr = sr.astype(str)
 
     return sr.apply(_parse_money).astype(float)
 
@@ -373,6 +373,71 @@ def _money_parse_score(sr: pd.Series, sample_rows: int = 300) -> int:
     return int(valid.sum())
 
 
+def _col_by_letter(df: pd.DataFrame, letters: str) -> Optional[str]:
+    if df is None or df.empty:
+        return None
+    s = letters.strip().upper()
+    if not s:
+        return None
+    n = 0
+    for ch in s:
+        if not ("A" <= ch <= "Z"):
+            return None
+        n = n * 26 + (ord(ch) - ord("A") + 1)
+    idx0 = n - 1
+    return df.columns[idx0] if 0 <= idx0 < len(df.columns) else None
+
+
+def _resolve_ticket_tarif_col(df: pd.DataFrame) -> Optional[str]:
+    if df is None or df.empty:
+        return None
+
+    candidate_names = ["Tarif", "tarif", "Amount", "Nominal", "Jumlah"]
+    candidates = []
+    seen = set()
+
+    for col in [
+        _find_best_numeric_col(df, ["Tarif", "tarif"]),
+        _find_best_numeric_col(df, ["Amount", "Nominal", "Jumlah"]),
+        _col_by_letter(df, "Y"),
+    ]:
+        if col and col not in seen:
+            candidates.append(col)
+            seen.add(col)
+
+    # Scan all columns as last resort, but prefer columns that look money-like.
+    for c in df.columns:
+        if not isinstance(c, str) or c in seen:
+            continue
+        label = c.lower()
+        if any(k in label for k in ["tarif", "amount", "nominal", "jumlah", "fare", "price"]):
+            candidates.append(c)
+            seen.add(c)
+
+    best_col = None
+    best_score = -1
+
+    for c in candidates:
+        score = _money_parse_score(df[c])
+        if score > best_score:
+            best_col = c
+            best_score = score
+
+    if best_score > 0 and best_col is not None:
+        return best_col
+
+    # Absolute fallback: pick the most numeric-looking column in the whole dataframe.
+    for c in df.columns:
+        if not isinstance(c, str):
+            continue
+        score = _money_parse_score(df[c])
+        if score > best_score:
+            best_col = c
+            best_score = score
+
+    return best_col
+
+
 def _find_best_numeric_col(df: pd.DataFrame, names: List[str]) -> Optional[str]:
     if df is None or df.empty:
         return None
@@ -489,7 +554,7 @@ def _ticket_sample_value_score(df: pd.DataFrame) -> Tuple[int, int, int]:
     sample_rows = min(200, len(df))
 
     created_col = _find_col(df, ["Created", "Created Date", "Created At", "Created Time"])
-    tarif_col = _find_best_numeric_col(df, ["Tarif", "tarif"])
+    tarif_col = _resolve_ticket_tarif_col(df)
     bank_col = _find_col(df, ["Bank", "Payment Channel", "channel", "payment method"])
     status_col = _find_col(df, ["St Bayar", "Status Bayar", "status", "status bayar"])
 
@@ -1218,7 +1283,7 @@ if go:
         if tiket_df["__ticket_date__"].notna().any():
             t_date_action = "__ticket_date__"
 
-    t_amt_tarif = _find_best_numeric_col(tiket_df, ["Tarif", "tarif"])
+    t_amt_tarif = _resolve_ticket_tarif_col(tiket_df)
     if t_amt_tarif is None:
         st.error("Kolom nominal 'Tarif' tidak ditemukan pada Tiket Detail.")
         st.stop()
@@ -1463,7 +1528,7 @@ if go:
         or _col_by_letter_local(tiket_df, "J")
     )
     date_col = "__ticket_date__" if "__ticket_date__" in tiket_df.columns else (_find_ticket_date_col(tiket_df) or _col_by_letter_local(tiket_df, "AG"))
-    tarif_col = _find_best_numeric_col(tiket_df, ["Tarif", "tarif"]) or _col_by_letter_local(tiket_df, "Y")
+    tarif_col = _resolve_ticket_tarif_col(tiket_df) or _col_by_letter_local(tiket_df, "Y")
     status_col = _find_col(tiket_df, ["St Bayar", "Status Bayar", "status", "status bayar"])
 
     required_missing = [
