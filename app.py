@@ -53,6 +53,14 @@ def _parse_money(val) -> float:
 
 
 def _to_num(sr: pd.Series) -> pd.Series:
+    if isinstance(sr, pd.DataFrame):
+        if sr.shape[1] == 0:
+            return pd.Series(dtype=float)
+        sr = sr.iloc[:, 0]
+
+    if pd.api.types.is_datetime64_any_dtype(sr):
+        raise TypeError("Kolom nominal terbaca sebagai datetime, bukan angka.")
+
     return sr.apply(_parse_money).astype(float)
 
 
@@ -313,18 +321,95 @@ def _read_any(uploaded_file) -> pd.DataFrame:
 
 
 
+def _make_columns_unique(columns) -> List[str]:
+    seen = {}
+    out = []
+    for raw in columns:
+        col = _strip_outer_quotes(str(raw).strip().lstrip("\ufeff"))
+        n = seen.get(col, 0) + 1
+        seen[col] = n
+        out.append(col if n == 1 else f"{col}__{n}")
+    return out
+
+
 def _clean_columns(df: pd.DataFrame) -> pd.DataFrame:
     if df is None or df.empty:
         return df
 
     out = df.copy()
-    out.columns = [_strip_outer_quotes(str(c).strip().lstrip("\ufeff")) for c in out.columns]
+    out.columns = _make_columns_unique(out.columns)
 
     for c in out.columns:
         if out[c].dtype == object:
             out[c] = out[c].map(_strip_outer_quotes)
 
     return out
+
+
+def _money_parse_score(sr: pd.Series, sample_rows: int = 300) -> int:
+    if sr is None:
+        return -1
+
+    if isinstance(sr, pd.DataFrame):
+        if sr.shape[1] == 0:
+            return -1
+        sr = sr.iloc[:, 0]
+
+    if pd.api.types.is_datetime64_any_dtype(sr):
+        return -1
+
+    raw = sr.head(sample_rows).fillna("").astype(str).map(_strip_outer_quotes).str.strip()
+    if raw.empty:
+        return -1
+
+    has_digit = raw.str.contains(r"\d", regex=True, na=False)
+    if not has_digit.any():
+        return -1
+
+    parsed = raw.apply(_parse_money)
+    zero_like = raw.str.fullmatch(r"[-(\s]*0+[\.,0\s)]*", na=False)
+    valid = has_digit & ((parsed != 0) | zero_like)
+
+    return int(valid.sum())
+
+
+def _find_best_numeric_col(df: pd.DataFrame, names: List[str]) -> Optional[str]:
+    if df is None or df.empty:
+        return None
+
+    cols = [c for c in df.columns if isinstance(c, str)]
+    candidates: List[str] = []
+    seen = set()
+
+    exact_map = {c.lower().strip().lstrip("\ufeff"): c for c in cols}
+    for n in names:
+        key = n.lower().strip()
+        if key in exact_map and exact_map[key] not in seen:
+            candidates.append(exact_map[key])
+            seen.add(exact_map[key])
+
+    for n in names:
+        key = n.lower().strip()
+        for c in cols:
+            if key in c.lower() and c not in seen:
+                candidates.append(c)
+                seen.add(c)
+
+    if not candidates:
+        return None
+
+    best_col = None
+    best_score = -1
+    for c in candidates:
+        score = _money_parse_score(df[c])
+        if score > best_score:
+            best_col = c
+            best_score = score
+
+    if best_col is not None:
+        return best_col
+
+    return candidates[0]
 
 
 def _read_csv_with_sep(uploaded_file, enc: str, sep, engine: Optional[str] = "python") -> pd.DataFrame:
@@ -404,7 +489,7 @@ def _ticket_sample_value_score(df: pd.DataFrame) -> Tuple[int, int, int]:
     sample_rows = min(200, len(df))
 
     created_col = _find_col(df, ["Created", "Created Date", "Created At", "Created Time"])
-    tarif_col = _find_col(df, ["Tarif", "tarif"])
+    tarif_col = _find_best_numeric_col(df, ["Tarif", "tarif"])
     bank_col = _find_col(df, ["Bank", "Payment Channel", "channel", "payment method"])
     status_col = _find_col(df, ["St Bayar", "Status Bayar", "status", "status bayar"])
 
@@ -1133,7 +1218,7 @@ if go:
         if tiket_df["__ticket_date__"].notna().any():
             t_date_action = "__ticket_date__"
 
-    t_amt_tarif = _find_col(tiket_df, ["Tarif", "tarif"])
+    t_amt_tarif = _find_best_numeric_col(tiket_df, ["Tarif", "tarif"])
     if t_amt_tarif is None:
         st.error("Kolom nominal 'Tarif' tidak ditemukan pada Tiket Detail.")
         st.stop()
@@ -1378,7 +1463,7 @@ if go:
         or _col_by_letter_local(tiket_df, "J")
     )
     date_col = "__ticket_date__" if "__ticket_date__" in tiket_df.columns else (_find_ticket_date_col(tiket_df) or _col_by_letter_local(tiket_df, "AG"))
-    tarif_col = _find_col(tiket_df, ["Tarif", "tarif"]) or _col_by_letter_local(tiket_df, "Y")
+    tarif_col = _find_best_numeric_col(tiket_df, ["Tarif", "tarif"]) or _col_by_letter_local(tiket_df, "Y")
     status_col = _find_col(tiket_df, ["St Bayar", "Status Bayar", "status", "status bayar"])
 
     required_missing = [
