@@ -817,7 +817,7 @@ def _excel_number_format() -> str:
     return '#,##0;(#,##0)'
 
 
-def _autofit_worksheet(ws, min_width: int = 10, max_width: int = 40) -> None:
+def _autofit_worksheet(ws, min_width: int = 10, max_width: int = 60) -> None:
     for col_idx in range(1, ws.max_column + 1):
         col_letter = get_column_letter(col_idx)
         max_len = 0
@@ -827,15 +827,59 @@ def _autofit_worksheet(ws, min_width: int = 10, max_width: int = 40) -> None:
             value = cell.value
 
             if value is None:
-                text = ""
+                display = ""
             elif isinstance(value, (int, float, np.integer, np.floating)):
-                text = f"{value:,.0f}"
+                display = f"{value:,.0f}"
+            elif hasattr(value, "strftime"):
+                try:
+                    display = value.strftime("%Y-%m-%d")
+                except Exception:
+                    display = str(value)
             else:
-                text = str(value)
+                display = str(value)
 
-            max_len = max(max_len, len(text))
+            max_len = max(max_len, len(display))
 
         ws.column_dimensions[col_letter].width = min(max(min_width, max_len + 2), max_width)
+
+
+def _coerce_export_numeric_series(sr: pd.Series) -> pd.Series:
+    if sr is None:
+        return sr
+
+    if pd.api.types.is_numeric_dtype(sr):
+        return pd.to_numeric(sr, errors="coerce")
+
+    if pd.api.types.is_datetime64_any_dtype(sr):
+        return sr
+
+    raw = sr.astype(str).str.strip()
+    blank_mask = raw.eq("") | raw.str.lower().isin(["nan", "none", "null"])
+    coerced = raw.mask(blank_mask).apply(_parse_money)
+    coerced = pd.to_numeric(coerced, errors="coerce")
+    return coerced
+
+
+def _prepare_export_dataframe(
+    df: pd.DataFrame,
+    numeric_cols: Optional[List[str]] = None,
+    date_cols: Optional[List[str]] = None,
+) -> pd.DataFrame:
+    out = df.copy()
+    numeric_cols = list(numeric_cols or [])
+    date_cols = list(date_cols or [])
+
+    for col in numeric_cols:
+        if col in out.columns:
+            out[col] = _coerce_export_numeric_series(out[col])
+
+    for col in date_cols:
+        if col in out.columns:
+            if str(col).upper() in {"TANGGAL", "TANGGAL "}:
+                continue
+            out[col] = pd.to_datetime(out[col], errors="coerce")
+
+    return out
 
 
 def _style_excel_sheet(
@@ -883,7 +927,7 @@ def _style_excel_sheet(
             elif header in date_cols:
                 cell.alignment = Alignment(horizontal="left", vertical="center")
             elif header in numeric_cols:
-                if isinstance(cell.value, (int, float, np.integer, np.floating)) and not pd.isna(cell.value):
+                if cell.value not in (None, ""):
                     cell.number_format = _excel_number_format()
                 cell.alignment = Alignment(horizontal="right", vertical="center")
             else:
@@ -902,7 +946,11 @@ def _write_styled_sheet(
     center_cols: Optional[List[str]] = None,
     freeze_panes: str = "A2",
 ) -> None:
-    export_df = df.copy()
+    export_df = _prepare_export_dataframe(
+        df,
+        numeric_cols=numeric_cols,
+        date_cols=date_cols,
+    )
     export_df.to_excel(writer, index=False, sheet_name=sheet_name)
     ws = writer.book[sheet_name]
     _style_excel_sheet(
