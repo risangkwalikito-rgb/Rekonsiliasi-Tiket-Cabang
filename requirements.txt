@@ -1,8 +1,7 @@
 streamlit
 pandas
 numpy
-openpyxl
 python-dateutil
-pytest
-pyexcel-xls
+openpyxl
 xlrd
+pyexcel-xls
