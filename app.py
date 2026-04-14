@@ -680,8 +680,14 @@ def _build_ticket_date_from_selected_source(
     if selected_col is None or selected_col not in df.columns:
         return pd.Series(pd.NaT, index=df.index, dtype="datetime64[ns]")
 
-    if (date_source or "").strip().lower() == "action":
-        return _parse_ticket_action_series(df[selected_col])
+    source = (date_source or "").strip().lower()
+
+    if source == "action":
+        temp = df.copy()
+        created_col = _find_col(temp, ["Created", "Created Date", "Created At", "Created Time"])
+        if created_col is not None:
+            temp = _fill_action_from_created(temp, selected_col, created_col)
+        return pd.to_datetime(temp[selected_col].apply(_to_date), errors="coerce")
 
     return _parse_ticket_created_series(df[selected_col], tz_mode=tz_mode)
 
@@ -1134,7 +1140,7 @@ with st.sidebar:
         "Kolom tanggal yang dipakai",
         options=["Created", "Action"],
         index=0,
-        help="Pilih satu kolom tanggal saja. Tidak ada fallback otomatis.",
+        help="Created: pakai Created saja. Action: mengikuti logic app awal, termasuk isi Action dari Created jika Action kosong.",
     )
 
     st.header("4) Zona Waktu Tiket Detail")
