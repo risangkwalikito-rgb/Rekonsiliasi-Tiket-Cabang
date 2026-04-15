@@ -18,25 +18,44 @@ from openpyxl.utils import get_column_letter
 # ---------- Utilities ----------
 
 def _parse_money(val) -> float:
-    if val is None or (isinstance(val, float) and np.isnan(val)):
+    if val is None or pd.isna(val):
         return 0.0
+
     if isinstance(val, (int, float, np.number)):
-        return float(val)
+        try:
+            return float(val)
+        except Exception:
+            return 0.0
+
+    if isinstance(val, (pd.Timestamp, np.datetime64)):
+        return 0.0
+
     s = str(val).strip()
     if not s:
         return 0.0
+
     neg = False
     if s.startswith("(") and s.endswith(")"):
         neg, s = True, s[1:-1].strip()
     if s.endswith("-"):
         neg, s = True, s[:-1].strip()
+
+    s = s.replace("\u00a0", " ").strip()
     s = re.sub(r"(idr|rp|cr|dr)", "", s, flags=re.IGNORECASE)
     s = re.sub(r"[^0-9\.,\-]", "", s).strip()
+
+    if not s or re.fullmatch(r"[-\.,]+", s):
+        return 0.0
+
     if s.startswith("-"):
         neg, s = True, s[1:].strip()
 
+    if not s or re.fullmatch(r"[\.,]+", s):
+        return 0.0
+
     last_dot = s.rfind(".")
     last_com = s.rfind(",")
+
     if last_dot == -1 and last_com == -1:
         num_s = s
     elif last_dot > last_com:
@@ -47,8 +66,13 @@ def _parse_money(val) -> float:
     try:
         num = float(num_s)
     except Exception:
-        num_s = s.replace(".", "").replace(",", "")
-        num = float(num_s) if num_s else 0.0
+        num_s = re.sub(r"[^0-9]", "", s)
+        if not num_s:
+            return 0.0
+        try:
+            num = float(num_s)
+        except Exception:
+            return 0.0
 
     return -num if neg else num
 
