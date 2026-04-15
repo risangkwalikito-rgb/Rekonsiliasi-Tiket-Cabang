@@ -629,37 +629,30 @@ def _parse_ticket_created_series(sr: pd.Series, tz_mode: str = "WIB") -> pd.Seri
 def _parse_ticket_action_series(sr: pd.Series) -> pd.Series:
     raw = sr.fillna("").astype(str).str.strip()
 
-    dt = pd.to_datetime(raw, format="%d/%m/%Y", errors="coerce")
-    missing = dt.isna() & raw.ne("")
+    # Samakan dengan perilaku app awal, tetapi lebih ketat untuk format yang sering muncul
+    # di file Tiket Detail: dd/mm/yyyy hh:mm dan turunannya.
+    dt = pd.Series(pd.NaT, index=sr.index, dtype="datetime64[ns]")
 
-    if missing.any():
-        dt_hm = pd.to_datetime(raw[missing], format="%d/%m/%Y %H:%M", errors="coerce")
-        dt.loc[missing] = dt_hm
+    formats = [
+        "%d/%m/%Y %H:%M",
+        "%d/%m/%Y %H:%M:%S",
+        "%d/%m/%Y",
+        "%Y-%m-%d %H:%M:%S",
+        "%Y-%m-%d %H:%M",
+        "%Y-%m-%d",
+    ]
 
-    missing = dt.isna() & raw.ne("")
-    if missing.any():
-        dt_hms = pd.to_datetime(raw[missing], format="%d/%m/%Y %H:%M:%S", errors="coerce")
-        dt.loc[missing] = dt_hms
-
-    missing = dt.isna() & raw.ne("")
-    if missing.any():
-        dt_ymd = pd.to_datetime(raw[missing], format="%Y-%m-%d", errors="coerce")
-        dt.loc[missing] = dt_ymd
-
-    missing = dt.isna() & raw.ne("")
-    if missing.any():
-        dt_ymd_hm = pd.to_datetime(raw[missing], format="%Y-%m-%d %H:%M", errors="coerce")
-        dt.loc[missing] = dt_ymd_hm
+    for fmt in formats:
+        missing = dt.isna() & raw.ne("")
+        if not missing.any():
+            break
+        parsed = pd.to_datetime(raw[missing], format=fmt, errors="coerce")
+        dt.loc[missing] = parsed
 
     missing = dt.isna() & raw.ne("")
     if missing.any():
-        dt_ymd_hms = pd.to_datetime(raw[missing], format="%Y-%m-%d %H:%M:%S", errors="coerce")
-        dt.loc[missing] = dt_ymd_hms
-
-    missing = dt.isna() & raw.ne("")
-    if missing.any():
-        dt_fallback = pd.to_datetime(raw[missing], dayfirst=True, errors="coerce")
-        dt.loc[missing] = dt_fallback
+        parsed = raw[missing].apply(_to_date)
+        dt.loc[missing] = pd.to_datetime(parsed, errors="coerce")
 
     return dt.dt.normalize()
 
@@ -687,7 +680,7 @@ def _build_ticket_date_from_selected_source(
         created_col = _find_col(temp, ["Created", "Created Date", "Created At", "Created Time"])
         if created_col is not None:
             temp = _fill_action_from_created(temp, selected_col, created_col)
-        return pd.to_datetime(temp[selected_col].apply(_to_date), errors="coerce")
+        return _parse_ticket_action_series(temp[selected_col])
 
     return _parse_ticket_created_series(df[selected_col], tz_mode=tz_mode)
 
