@@ -329,7 +329,27 @@ def _col_by_letter(df: pd.DataFrame, letters: str) -> Optional[str]:
     return df.columns[idx0] if 0 <= idx0 < len(df.columns) else None
 
 
-def _parse_created_date_series(sr: pd.Series) -> pd.Series:
+def _adjust_created_cutoff(dt: pd.Series, tz_mode: str = "WIB") -> pd.Series:
+    tz_norm = (tz_mode or "WIB").strip().upper()
+    if dt.empty or tz_norm == "WIB":
+        return dt
+
+    adjusted = dt.copy()
+
+    if tz_norm == "WITA":
+        mask = adjusted.notna() & adjusted.dt.hour.eq(0)
+        adjusted.loc[mask] = adjusted.loc[mask] - pd.Timedelta(days=1)
+        return adjusted
+
+    if tz_norm == "WIT":
+        mask = adjusted.notna() & adjusted.dt.hour.isin([0, 1])
+        adjusted.loc[mask] = adjusted.loc[mask] - pd.Timedelta(days=1)
+        return adjusted
+
+    return adjusted
+
+
+def _parse_created_date_series(sr: pd.Series, tz_mode: str = "WIB") -> pd.Series:
     raw = sr.fillna("").astype(str).str.strip()
     dt = pd.to_datetime(raw, format="%d/%m/%Y %H:%M", errors="coerce")
 
@@ -353,17 +373,23 @@ def _parse_created_date_series(sr: pd.Series) -> pd.Series:
         dt_fallback = pd.to_datetime(raw[missing], dayfirst=True, errors="coerce")
         dt.loc[missing] = dt_fallback
 
+    dt = _adjust_created_cutoff(dt, tz_mode=tz_mode)
     return dt.dt.normalize()
 
 
-def _build_ticket_date_priority(df: pd.DataFrame, action_col: Optional[str], created_col: Optional[str]) -> pd.Series:
+def _build_ticket_date_priority(
+    df: pd.DataFrame,
+    action_col: Optional[str],
+    created_col: Optional[str],
+    tz_mode: str = "WIB",
+) -> pd.Series:
     out = pd.Series(pd.NaT, index=df.index, dtype="datetime64[ns]")
 
     if action_col and action_col in df.columns:
         out = pd.to_datetime(df[action_col].apply(_to_date), errors="coerce")
 
     if created_col and created_col in df.columns:
-        created_dt = _parse_created_date_series(df[created_col])
+        created_dt = _parse_created_date_series(df[created_col], tz_mode=tz_mode)
         out = out.fillna(created_dt)
 
     return out
@@ -598,7 +624,21 @@ with st.sidebar:
     y, m = _month_selector()
     month_start = pd.Timestamp(y, m, 1)
     month_end = pd.Timestamp(y, m, calendar.monthrange(y, m)[1])
-    st.caption(f"Periode dipakai: {month_start.date()} s/d {month_end.date()}")
+
+    st.header("3) Zona Waktu untuk Created (fallback)")
+    ticket_tz_mode = st.selectbox(
+        "Zona waktu Created",
+        options=["WIB", "WITA", "WIT"],
+        index=0,
+        help=(
+            "Hanya berlaku saat tanggal diambil dari Created karena Action kosong/tidak valid. "
+            "WIB: tidak ada penyesuaian. "
+            "WITA: jam 00:00:00-00:59:59 mundur 1 hari. "
+            "WIT: jam 00:00:00-01:59:59 mundur 1 hari."
+        ),
+    )
+
+    st.caption(f"Periode dipakai: {month_start.date()} s/d {month_end.date()} | Zona Created fallback: {ticket_tz_mode}")
 
     go = st.button("Proses", type="primary", use_container_width=True)
 
@@ -636,6 +676,7 @@ if go:
         tiket_df,
         action_col=t_action,
         created_col=t_created,
+        tz_mode=ticket_tz_mode,
     )
     t_date_action = "__ticket_date__"
 
