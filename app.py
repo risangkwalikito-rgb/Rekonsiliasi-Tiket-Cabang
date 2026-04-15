@@ -314,6 +314,61 @@ def _find_col(df: pd.DataFrame, names: List[str]) -> Optional[str]:
     return None
 
 
+def _col_by_letter(df: pd.DataFrame, letters: str) -> Optional[str]:
+    if df is None or df.empty:
+        return None
+    s = letters.strip().upper()
+    if not s:
+        return None
+    n = 0
+    for ch in s:
+        if not ("A" <= ch <= "Z"):
+            return None
+        n = n * 26 + (ord(ch) - ord("A") + 1)
+    idx0 = n - 1
+    return df.columns[idx0] if 0 <= idx0 < len(df.columns) else None
+
+
+def _parse_created_date_series(sr: pd.Series) -> pd.Series:
+    raw = sr.fillna("").astype(str).str.strip()
+    dt = pd.to_datetime(raw, format="%d/%m/%Y %H:%M", errors="coerce")
+
+    missing = dt.isna() & raw.ne("")
+    if missing.any():
+        dt_hms = pd.to_datetime(raw[missing], format="%d/%m/%Y %H:%M:%S", errors="coerce")
+        dt.loc[missing] = dt_hms
+
+    missing = dt.isna() & raw.ne("")
+    if missing.any():
+        dt_ymd_hms = pd.to_datetime(raw[missing], format="%Y-%m-%d %H:%M:%S", errors="coerce")
+        dt.loc[missing] = dt_ymd_hms
+
+    missing = dt.isna() & raw.ne("")
+    if missing.any():
+        dt_ymd_hm = pd.to_datetime(raw[missing], format="%Y-%m-%d %H:%M", errors="coerce")
+        dt.loc[missing] = dt_ymd_hm
+
+    missing = dt.isna() & raw.ne("")
+    if missing.any():
+        dt_fallback = pd.to_datetime(raw[missing], dayfirst=True, errors="coerce")
+        dt.loc[missing] = dt_fallback
+
+    return dt.dt.normalize()
+
+
+def _build_ticket_date_priority(df: pd.DataFrame, action_col: Optional[str], created_col: Optional[str]) -> pd.Series:
+    out = pd.Series(pd.NaT, index=df.index, dtype="datetime64[ns]")
+
+    if action_col and action_col in df.columns:
+        out = pd.to_datetime(df[action_col].apply(_to_date), errors="coerce")
+
+    if created_col and created_col in df.columns:
+        created_dt = _parse_created_date_series(df[created_col])
+        out = out.fillna(created_dt)
+
+    return out
+
+
 def _idr_fmt(val) -> str:
     if val is None:
         return "-"
@@ -571,10 +626,18 @@ if go:
         st.stop()
 
     # ---------------------- Tiket Detail (TABEL 1) ----------------------
-    t_date_action = _find_col(tiket_df, ["Action Date", "Action"])
-    if t_date_action is None:
-        st.error("Kolom tanggal 'Action Date' / 'Action' tidak ditemukan pada Tiket Detail.")
+    t_action = _find_col(tiket_df, ["Action Date", "Action"]) or _col_by_letter(tiket_df, "AG")
+    t_created = _find_col(tiket_df, ["Created", "Created Date", "Created At", "Created Time"]) or _col_by_letter(tiket_df, "AD")
+    if t_action is None and t_created is None:
+        st.error("Kolom tanggal 'Action Date' / 'Action' atau 'Created' tidak ditemukan pada Tiket Detail.")
         st.stop()
+
+    tiket_df["__ticket_date__"] = _build_ticket_date_priority(
+        tiket_df,
+        action_col=t_action,
+        created_col=t_created,
+    )
+    t_date_action = "__ticket_date__"
 
     t_amt_tarif = _find_col(tiket_df, ["Tarif", "tarif"])
     if t_amt_tarif is None:
@@ -614,11 +677,7 @@ if go:
 
     # ------------------  TABEL 1: TIKET DETAIL ESPAY (PAID ONLY) -------------------
     td = tiket_df.copy()
-    t_created = _find_col(tiket_df, ["Created", "Created Date", "Created At", "Created Time"])
-    if t_created is not None:
-        td = _fill_action_from_created(td, t_date_action, t_created)
-
-    td[t_date_action] = pd.to_datetime(td[t_date_action].apply(_to_date), errors="coerce")
+    td[t_date_action] = pd.to_datetime(td[t_date_action], errors="coerce")
     td = td[~td[t_date_action].isna()]
 
     td_bank_norm = td[t_bank].apply(_norm_token)
@@ -819,7 +878,7 @@ if go:
         )
         or _col_by_letter_local(tiket_df, "J")
     )
-    date_col = _find_col(tiket_df, ["Action Date", "Action"]) or _col_by_letter_local(tiket_df, "AG")
+    date_col = "__ticket_date__"
     tarif_col = _find_col(tiket_df, ["Tarif", "tarif"]) or _col_by_letter_local(tiket_df, "Y")
     status_col = _find_col(tiket_df, ["St Bayar", "Status Bayar", "status", "status bayar"])
 
@@ -828,7 +887,7 @@ if go:
             ("TYPE (kolom B)", type_main_col),
             ("BANK (kolom I)", bank_col),
             ("TIPE / SUB-TIPE (kolom J)", type_sub_col),
-            ("ACTION/Action Date (kolom AG)", date_col),
+            ("TANGGAL TIKET (Action lalu Created)", date_col),
             ("TARIF (kolom Y)", tarif_col),
             ("ST BAYAR / STATUS BAYAR", status_col),
         ]
@@ -840,10 +899,7 @@ if go:
         st.warning("Kolom wajib untuk tabel 'Detail Tiket (GO SHOW/ONLINE) [PAID]' belum lengkap: " + ", ".join(required_missing))
     else:
         tix = tiket_df.copy()
-        if t_created is not None:
-            tix = _fill_action_from_created(tix, date_col, t_created)
-
-        tix[date_col] = pd.to_datetime(tix[date_col].apply(_to_date), errors="coerce")
+        tix[date_col] = pd.to_datetime(tix[date_col], errors="coerce")
         tix = tix[~tix[date_col].isna()]
         tix = tix[(tix[date_col] >= month_start) & (tix[date_col] <= month_end)]
 
@@ -1170,10 +1226,7 @@ if go:
         st.warning("Kolom untuk 'RINCIAN SELISIH' belum lengkap: " + ", ".join(miss_rincian))
     else:
         td_gap = tiket_df.copy()
-        if t_created is not None:
-            td_gap = _fill_action_from_created(td_gap, t_date_action, t_created)
-
-        td_gap[t_date_action] = pd.to_datetime(td_gap[t_date_action].apply(_to_date), errors="coerce")
+        td_gap[t_date_action] = pd.to_datetime(td_gap[t_date_action], errors="coerce")
         td_gap = td_gap[~td_gap[t_date_action].isna()]
         td_gap = td_gap[(td_gap[t_date_action] >= month_start) & (td_gap[t_date_action] <= month_end)]
 
