@@ -1735,6 +1735,13 @@ if go:
             SETTLEMENT_AMOUNT=(s_amt_legacy, "sum"),
         )
 
+        tiket_order_cmp["__order_key__"] = (
+            tiket_order_cmp["__order_key__"].fillna("").astype(str)
+        )
+        settle_order_cmp["__order_key__"] = (
+            settle_order_cmp["__order_key__"].fillna("").astype(str)
+        )
+
         rincian_cmp = tiket_order_cmp.merge(settle_order_cmp, on="__order_key__", how="outer")
         rincian_cmp["ORDER ID"] = rincian_cmp["ORDER_ID_TIKET"].fillna(rincian_cmp["ORDER_ID_SETTLEMENT"])
         rincian_cmp["TARIF TIKET DETAIL"] = rincian_cmp["TARIF_TIKET_DETAIL"].fillna(0.0)
