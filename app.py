@@ -5,30 +5,21 @@ import io
 import re
 import unicodedata
 import zipfile
-from typing import Callable, List, Optional, Tuple
+from typing import List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
 import streamlit as st
 from dateutil import parser as dtparser
-from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
-from openpyxl.utils import get_column_letter
 
 
 # ---------- Utilities ----------
 
 def _parse_money(val) -> float:
-    if val is None or pd.isna(val):
+    if val is None or (isinstance(val, float) and np.isnan(val)):
         return 0.0
-
     if isinstance(val, (int, float, np.number)):
-        try:
-            return float(val)
-        except Exception:
-            return 0.0
-
-    if isinstance(val, (pd.Timestamp, np.datetime64)):
-        return 0.0
+        return float(val)
 
     s = str(val).strip()
     if not s:
@@ -40,22 +31,18 @@ def _parse_money(val) -> float:
     if s.endswith("-"):
         neg, s = True, s[:-1].strip()
 
-    s = s.replace("\u00a0", " ").strip()
+    s = s.strip().strip('"').strip("'")
     s = re.sub(r"(idr|rp|cr|dr)", "", s, flags=re.IGNORECASE)
     s = re.sub(r"[^0-9\.,\-]", "", s).strip()
 
-    if not s or re.fullmatch(r"[-\.,]+", s):
+    if not s or not re.search(r"\d", s):
         return 0.0
 
     if s.startswith("-"):
         neg, s = True, s[1:].strip()
 
-    if not s or re.fullmatch(r"[\.,]+", s):
-        return 0.0
-
     last_dot = s.rfind(".")
     last_com = s.rfind(",")
-
     if last_dot == -1 and last_com == -1:
         num_s = s
     elif last_dot > last_com:
@@ -66,8 +53,8 @@ def _parse_money(val) -> float:
     try:
         num = float(num_s)
     except Exception:
-        num_s = re.sub(r"[^0-9]", "", s)
-        if not num_s:
+        num_s = re.sub(r"[^0-9\-]", "", s)
+        if not num_s or num_s in {"-", "--"}:
             return 0.0
         try:
             num = float(num_s)
@@ -87,6 +74,11 @@ def _norm_str(val) -> str:
     s = "".join(ch for ch in s if not unicodedata.combining(ch))
     return s.strip().lower()
 
+
+def _norm_token(val) -> str:
+    s = _norm_str(val).strip('"').strip("'")
+    s = re.sub(r"[\s\-_]+", "", s)
+    return s
 
 
 def _is_bca_va_product(prod_val) -> bool:
@@ -176,32 +168,6 @@ def _to_date(val) -> Optional[pd.Timestamp]:
     s = str(val).strip()
     if not s:
         return None
-
-    if re.fullmatch(r"\d{1,5}(\.0+)?", s):
-        try:
-            serial = float(s)
-            if 1 <= serial <= 100000:
-                base = pd.Timestamp("1899-12-30")
-                return (base + pd.to_timedelta(serial, unit="D")).normalize()
-        except Exception:
-            pass
-
-    explicit_formats = (
-        "%d/%m/%Y %H:%M:%S",
-        "%d/%m/%Y %H:%M",
-        "%d-%m-%Y %H:%M:%S",
-        "%d-%m-%Y %H:%M",
-        "%d/%m/%Y",
-        "%d-%m-%Y",
-        "%Y-%m-%d %H:%M:%S",
-        "%Y-%m-%d %H:%M",
-        "%Y-%m-%d",
-    )
-    for fmt in explicit_formats:
-        try:
-            return pd.Timestamp(pd.to_datetime(s, format=fmt, errors="raise").date())
-        except Exception:
-            continue
 
     m = _ddmmyyyy.search(s)
     if m:
@@ -328,264 +294,6 @@ def _read_any(uploaded_file) -> pd.DataFrame:
         return pd.DataFrame()
 
 
-def _clean_columns(df: pd.DataFrame) -> pd.DataFrame:
-    if df is None or df.empty:
-        return df
-    df.columns = [str(c).strip().lstrip("\ufeff") for c in df.columns]
-    return df
-
-
-def _read_csv_with_sep(uploaded_file, enc: str, sep, engine: Optional[str] = "python") -> pd.DataFrame:
-    uploaded_file.seek(0)
-    kwargs = {
-        "encoding": enc,
-        "sep": sep,
-        "dtype": str,
-        "na_filter": False,
-    }
-    if engine is not None:
-        kwargs["engine"] = engine
-    return pd.read_csv(uploaded_file, **kwargs)
-
-
-def _read_ticket_csv_comma(uploaded_file, enc: str) -> pd.DataFrame:
-    uploaded_file.seek(0)
-    return pd.read_csv(
-        uploaded_file,
-        encoding=enc,
-        sep=",",
-        dtype=str,
-        na_filter=False,
-        low_memory=False,
-    )
-
-
-def _read_tiket_detail_any(uploaded_file) -> pd.DataFrame:
-    if not uploaded_file:
-        return pd.DataFrame()
-
-    name = uploaded_file.name.lower()
-
-    try:
-        if name.endswith(".csv"):
-            for enc in ("utf-8-sig", "utf-8", "cp1252"):
-                try:
-                    return _clean_columns(_read_ticket_csv_comma(uploaded_file, enc))
-                except Exception:
-                    continue
-
-            st.error(
-                f"CSV Tiket Detail gagal dibaca: {uploaded_file.name}. "
-                "Pastikan file CSV valid dengan delimiter koma (,)."
-            )
-            return pd.DataFrame()
-
-        return _clean_columns(_read_any(uploaded_file))
-
-    except Exception as e:
-        st.error(f"Gagal membaca file Tiket Detail {uploaded_file.name}: {e}")
-        return pd.DataFrame()
-
-
-def _read_any(uploaded_file) -> pd.DataFrame:
-    if not uploaded_file:
-        return pd.DataFrame()
-    name = uploaded_file.name.lower()
-
-    try:
-        if name.endswith(".csv"):
-            for enc in ("utf-8-sig", "utf-8", "cp1252", "iso-8859-1"):
-                try:
-                    uploaded_file.seek(0)
-                    return pd.read_csv(
-                        uploaded_file,
-                        encoding=enc,
-                        sep=None,
-                        engine="python",
-                        dtype=str,
-                        na_filter=False,
-                    )
-                except Exception:
-                    continue
-            st.error(f"CSV gagal dibaca: {uploaded_file.name}. Simpan ulang sebagai UTF-8.")
-            return pd.DataFrame()
-
-        if name.endswith((".xlsx", ".xlsm", ".xltx", ".xltm")):
-            uploaded_file.seek(0)
-            return pd.read_excel(uploaded_file, engine="openpyxl")
-
-        if name.endswith(".xls"):
-            try:
-                uploaded_file.seek(0)
-                return pd.read_excel(uploaded_file, engine="xlrd")
-            except Exception:
-                pass
-            try:
-                uploaded_file.seek(0)
-                raw = uploaded_file.read()
-                from pyexcel_xls import get_data  # type: ignore
-
-                book = get_data(io.BytesIO(raw))
-                for _sh, rows in book.items():
-                    if not rows:
-                        continue
-                    header = [str(x).strip() if x is not None else "" for x in rows[0]]
-                    body = rows[1:] if len(rows) > 1 else []
-                    return pd.DataFrame(body, columns=header)
-            except Exception:
-                pass
-            try:
-                uploaded_file.seek(0)
-                return pd.read_excel(uploaded_file, engine="openpyxl")
-            except Exception:
-                st.error("Gagal membaca file .xls. Pasang 'xlrd' atau 'pyexcel-xls', atau simpan ulang ke .xlsx.")
-                return pd.DataFrame()
-
-        uploaded_file.seek(0)
-        return pd.read_excel(uploaded_file)
-
-    except ImportError:
-        st.error("Dukungan .xls perlu paket 'xlrd' atau 'pyexcel-xls'. Tambahkan di requirements.txt.")
-        return pd.DataFrame()
-    except Exception as e:
-        st.error(f"Gagal membaca {uploaded_file.name}: {e}")
-        return pd.DataFrame()
-
-
-def _clean_columns(df: pd.DataFrame) -> pd.DataFrame:
-    if df is None or df.empty:
-        return df
-    df.columns = [str(c).strip().lstrip("\ufeff") for c in df.columns]
-    return df
-
-
-def _read_csv_with_sep(uploaded_file, enc: str, sep) -> pd.DataFrame:
-    uploaded_file.seek(0)
-    return pd.read_csv(
-        uploaded_file,
-        encoding=enc,
-        sep=sep,
-        engine="python",
-        dtype=str,
-        na_filter=False,
-    )
-
-
-def _looks_split_ok(df: pd.DataFrame) -> bool:
-    if df is None or df.empty:
-        return False
-    if df.shape[1] > 1:
-        return True
-    if len(df.columns) != 1:
-        return False
-
-    col0 = str(df.columns[0]).strip().lower()
-    hints = (
-        "action",
-        "action date",
-        "created",
-        "tarif",
-        "bank",
-        "st bayar",
-        "status bayar",
-        "order id",
-        "payment",
-        "type",
-        "channel",
-    )
-    return any(h in col0 for h in hints)
-
-
-def _read_tiket_detail_any(uploaded_file) -> pd.DataFrame:
-    if not uploaded_file:
-        return pd.DataFrame()
-
-    name = uploaded_file.name.lower()
-
-    try:
-        if name.endswith(".csv"):
-            encodings = ("utf-8-sig", "utf-8", "cp1252", "iso-8859-1")
-            separators = (",", ";", "\t", "|", None)
-
-            for enc in encodings:
-                for sep in separators:
-                    try:
-                        df = _clean_columns(_read_csv_with_sep(uploaded_file, enc, sep))
-                        if _looks_split_ok(df):
-                            return df
-                    except Exception:
-                        continue
-
-            st.error(
-                f"CSV Tiket Detail gagal dipisahkan otomatis: {uploaded_file.name}. "
-                "Pastikan file tetap CSV valid dengan delimiter koma (,), titik koma (;), tab, atau pipe (|)."
-            )
-            return pd.DataFrame()
-
-        return _clean_columns(_read_any(uploaded_file))
-
-    except Exception as e:
-        st.error(f"Gagal membaca file Tiket Detail {uploaded_file.name}: {e}")
-        return pd.DataFrame()
-
-
-def _read_any(uploaded_file) -> pd.DataFrame:
-    if not uploaded_file:
-        return pd.DataFrame()
-    name = uploaded_file.name.lower()
-
-    try:
-        if name.endswith(".csv"):
-            for enc in ("utf-8-sig", "utf-8", "cp1252", "iso-8859-1"):
-                try:
-                    return _clean_columns(_read_csv_with_sep(uploaded_file, enc, None))
-                except Exception:
-                    continue
-            st.error(f"CSV gagal dibaca: {uploaded_file.name}. Simpan ulang sebagai UTF-8.")
-            return pd.DataFrame()
-
-        if name.endswith((".xlsx", ".xlsm", ".xltx", ".xltm")):
-            uploaded_file.seek(0)
-            return pd.read_excel(uploaded_file, engine="openpyxl")
-
-        if name.endswith(".xls"):
-            try:
-                uploaded_file.seek(0)
-                return pd.read_excel(uploaded_file, engine="xlrd")
-            except Exception:
-                pass
-            try:
-                uploaded_file.seek(0)
-                raw = uploaded_file.read()
-                from pyexcel_xls import get_data  # type: ignore
-
-                book = get_data(io.BytesIO(raw))
-                for _sh, rows in book.items():
-                    if not rows:
-                        continue
-                    header = [str(x).strip() if x is not None else "" for x in rows[0]]
-                    body = rows[1:] if len(rows) > 1 else []
-                    return pd.DataFrame(body, columns=header)
-            except Exception:
-                pass
-            try:
-                uploaded_file.seek(0)
-                return pd.read_excel(uploaded_file, engine="openpyxl")
-            except Exception:
-                st.error("Gagal membaca file .xls. Pasang 'xlrd' atau 'pyexcel-xls', atau simpan ulang ke .xlsx.")
-                return pd.DataFrame()
-
-        uploaded_file.seek(0)
-        return pd.read_excel(uploaded_file)
-
-    except ImportError:
-        st.error("Dukungan .xls perlu paket 'xlrd' atau 'pyexcel-xls'. Tambahkan di requirements.txt.")
-        return pd.DataFrame()
-    except Exception as e:
-        st.error(f"Gagal membaca {uploaded_file.name}: {e}")
-        return pd.DataFrame()
-
-
 def _find_col(df: pd.DataFrame, names: List[str]) -> Optional[str]:
     if df.empty:
         return None
@@ -604,109 +312,6 @@ def _find_col(df: pd.DataFrame, names: List[str]) -> Optional[str]:
                 return c
 
     return None
-
-
-def _adjust_created_cutoff(dt: pd.Series, tz_mode: str) -> pd.Series:
-    tz_norm = (tz_mode or "WIB").strip().upper()
-    if dt.empty or tz_norm == "WIB":
-        return dt
-
-    adjusted = dt.copy()
-
-    if tz_norm == "WITA":
-        mask = adjusted.notna() & adjusted.dt.hour.eq(0)
-        adjusted.loc[mask] = adjusted.loc[mask] - pd.Timedelta(days=1)
-        return adjusted
-
-    if tz_norm == "WIT":
-        mask = adjusted.notna() & adjusted.dt.hour.isin([0, 1])
-        adjusted.loc[mask] = adjusted.loc[mask] - pd.Timedelta(days=1)
-        return adjusted
-
-    return adjusted
-
-
-def _parse_ticket_created_series(sr: pd.Series, tz_mode: str = "WIB") -> pd.Series:
-    raw = sr.fillna("").astype(str).str.strip()
-
-    dt = pd.to_datetime(raw, format="%d/%m/%Y %H:%M", errors="coerce")
-    missing = dt.isna() & raw.ne("")
-
-    if missing.any():
-        dt_seconds = pd.to_datetime(raw[missing], format="%d/%m/%Y %H:%M:%S", errors="coerce")
-        dt.loc[missing] = dt_seconds
-
-    missing = dt.isna() & raw.ne("")
-    if missing.any():
-        dt_ymd_seconds = pd.to_datetime(raw[missing], format="%Y-%m-%d %H:%M:%S", errors="coerce")
-        dt.loc[missing] = dt_ymd_seconds
-
-    missing = dt.isna() & raw.ne("")
-    if missing.any():
-        dt_ymd = pd.to_datetime(raw[missing], format="%Y-%m-%d %H:%M", errors="coerce")
-        dt.loc[missing] = dt_ymd
-
-    dt = _adjust_created_cutoff(dt, tz_mode)
-    return dt.dt.normalize()
-
-
-def _parse_ticket_action_series(sr: pd.Series) -> pd.Series:
-    raw = sr.fillna("").astype(str).str.strip()
-
-    # Samakan dengan perilaku app awal, tetapi lebih ketat untuk format yang sering muncul
-    # di file Tiket Detail: dd/mm/yyyy hh:mm dan turunannya.
-    dt = pd.Series(pd.NaT, index=sr.index, dtype="datetime64[ns]")
-
-    formats = [
-        "%d/%m/%Y %H:%M",
-        "%d/%m/%Y %H:%M:%S",
-        "%d/%m/%Y",
-        "%Y-%m-%d %H:%M:%S",
-        "%Y-%m-%d %H:%M",
-        "%Y-%m-%d",
-    ]
-
-    for fmt in formats:
-        missing = dt.isna() & raw.ne("")
-        if not missing.any():
-            break
-        parsed = pd.to_datetime(raw[missing], format=fmt, errors="coerce")
-        dt.loc[missing] = parsed
-
-    missing = dt.isna() & raw.ne("")
-    if missing.any():
-        parsed = raw[missing].apply(_to_date)
-        dt.loc[missing] = pd.to_datetime(parsed, errors="coerce")
-
-    return dt.dt.normalize()
-
-
-def _get_ticket_date_column(df: pd.DataFrame, date_source: str) -> Optional[str]:
-    source = (date_source or "").strip().lower()
-    if source == "action":
-        return _find_col(df, ["Action Date", "Action"])
-    return _find_col(df, ["Created", "Created Date", "Created At", "Created Time"])
-
-
-def _build_ticket_date_from_selected_source(
-    df: pd.DataFrame,
-    date_source: str,
-    tz_mode: str = "WIB",
-) -> pd.Series:
-    selected_col = _get_ticket_date_column(df, date_source)
-    if selected_col is None or selected_col not in df.columns:
-        return pd.Series(pd.NaT, index=df.index, dtype="datetime64[ns]")
-
-    source = (date_source or "").strip().lower()
-
-    if source == "action":
-        temp = df.copy()
-        created_col = _find_col(temp, ["Created", "Created Date", "Created At", "Created Time"])
-        if created_col is not None:
-            temp = _fill_action_from_created(temp, selected_col, created_col)
-        return _parse_ticket_action_series(temp[selected_col])
-
-    return _parse_ticket_created_series(df[selected_col], tz_mode=tz_mode)
 
 
 def _idr_fmt(val) -> str:
@@ -755,14 +360,14 @@ def _style_right(df: pd.DataFrame):
     return sty
 
 
-def _concat_files(files, reader: Callable = _read_any) -> pd.DataFrame:
+def _concat_files(files) -> pd.DataFrame:
     if not files:
         return pd.DataFrame()
     frames = []
     for f in files:
-        df = reader(f)
+        df = _read_any(f)
         if not df.empty:
-            df = _clean_columns(df)
+            df.columns = [str(c).strip().lstrip("\ufeff") for c in df.columns]
             df["__source__"] = getattr(f, "name", "file")
             frames.append(df)
     return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
@@ -888,217 +493,6 @@ def _month_selector() -> Tuple[int, int]:
     return year, month
 
 
-
-def _excel_number_format() -> str:
-    return '#,##0;(#,##0)'
-
-
-def _autofit_worksheet(ws, min_width: int = 10, max_width: int = 60) -> None:
-    for col_idx in range(1, ws.max_column + 1):
-        col_letter = get_column_letter(col_idx)
-        max_len = 0
-
-        for row_idx in range(1, ws.max_row + 1):
-            cell = ws.cell(row=row_idx, column=col_idx)
-            value = cell.value
-
-            if value is None:
-                display = ""
-            elif isinstance(value, (int, float, np.integer, np.floating)):
-                display = f"{value:,.0f}"
-            elif hasattr(value, "strftime"):
-                try:
-                    display = value.strftime("%Y-%m-%d")
-                except Exception:
-                    display = str(value)
-            else:
-                display = str(value)
-
-            max_len = max(max_len, len(display))
-
-        ws.column_dimensions[col_letter].width = min(max(min_width, max_len + 2), max_width)
-
-
-def _coerce_export_numeric_series(sr: pd.Series) -> pd.Series:
-    if sr is None:
-        return sr
-
-    if pd.api.types.is_numeric_dtype(sr):
-        return pd.to_numeric(sr, errors="coerce")
-
-    if pd.api.types.is_datetime64_any_dtype(sr):
-        return sr
-
-    raw = sr.astype(str).str.strip()
-    blank_mask = raw.eq("") | raw.str.lower().isin(["nan", "none", "null"])
-    coerced = raw.mask(blank_mask).apply(_parse_money)
-    coerced = pd.to_numeric(coerced, errors="coerce")
-    return coerced
-
-
-def _prepare_export_dataframe(
-    df: pd.DataFrame,
-    numeric_cols: Optional[List[str]] = None,
-    date_cols: Optional[List[str]] = None,
-) -> pd.DataFrame:
-    out = df.copy()
-    numeric_cols = list(numeric_cols or [])
-    date_cols = list(date_cols or [])
-
-    for col in numeric_cols:
-        if col in out.columns:
-            out[col] = _coerce_export_numeric_series(out[col])
-
-    for col in date_cols:
-        if col in out.columns:
-            if str(col).upper() in {"TANGGAL", "TANGGAL "}:
-                continue
-            out[col] = pd.to_datetime(out[col], errors="coerce")
-
-    return out
-
-
-def _style_excel_sheet(
-    ws,
-    numeric_cols: Optional[List[str]] = None,
-    date_cols: Optional[List[str]] = None,
-    center_cols: Optional[List[str]] = None,
-    freeze_panes: str = "A2",
-) -> None:
-    numeric_cols = set(numeric_cols or [])
-    date_cols = set(date_cols or [])
-    center_cols = set(center_cols or [])
-
-    thin = Side(style="thin", color="D9D9D9")
-    header_fill = PatternFill(fill_type="solid", fgColor="D9EAF7")
-
-    headers = {}
-    for col_idx in range(1, ws.max_column + 1):
-        header = ws.cell(row=1, column=col_idx)
-        header_text = "" if header.value is None else str(header.value).strip()
-        headers[col_idx] = header_text
-        header.font = Font(bold=True)
-        header.fill = header_fill
-        header.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
-        header.border = Border(left=thin, right=thin, top=thin, bottom=thin)
-
-    for row_idx in range(2, ws.max_row + 1):
-        is_total_row = False
-        for col_idx in range(1, ws.max_column + 1):
-            value = ws.cell(row=row_idx, column=col_idx).value
-            if isinstance(value, str) and value.strip().upper() == "TOTAL":
-                is_total_row = True
-                break
-
-        for col_idx in range(1, ws.max_column + 1):
-            cell = ws.cell(row=row_idx, column=col_idx)
-            header = headers.get(col_idx, "")
-            cell.border = Border(left=thin, right=thin, top=thin, bottom=thin)
-
-            if is_total_row:
-                cell.font = Font(bold=True)
-
-            if header in center_cols:
-                cell.alignment = Alignment(horizontal="center", vertical="center")
-            elif header in date_cols:
-                cell.alignment = Alignment(horizontal="left", vertical="center")
-            elif header in numeric_cols:
-                if cell.value not in (None, ""):
-                    cell.number_format = _excel_number_format()
-                cell.alignment = Alignment(horizontal="right", vertical="center")
-            else:
-                cell.alignment = Alignment(horizontal="left", vertical="center")
-
-    ws.freeze_panes = freeze_panes
-    _autofit_worksheet(ws)
-
-
-def _write_styled_sheet(
-    writer: pd.ExcelWriter,
-    sheet_name: str,
-    df: pd.DataFrame,
-    numeric_cols: Optional[List[str]] = None,
-    date_cols: Optional[List[str]] = None,
-    center_cols: Optional[List[str]] = None,
-    freeze_panes: str = "A2",
-) -> None:
-    export_df = _prepare_export_dataframe(
-        df,
-        numeric_cols=numeric_cols,
-        date_cols=date_cols,
-    )
-    export_df.to_excel(writer, index=False, sheet_name=sheet_name)
-    ws = writer.book[sheet_name]
-    _style_excel_sheet(
-        ws,
-        numeric_cols=numeric_cols,
-        date_cols=date_cols,
-        center_cols=center_cols,
-        freeze_panes=freeze_panes,
-    )
-
-
-def _build_combined_excel(
-    rekon_df: pd.DataFrame,
-    detail_tiket_df: Optional[pd.DataFrame] = None,
-    detail_settlement_df: Optional[pd.DataFrame] = None,
-    rincian_selisih_df: Optional[pd.DataFrame] = None,
-) -> bytes:
-    bio = io.BytesIO()
-
-    with pd.ExcelWriter(bio, engine="openpyxl") as writer:
-        _write_styled_sheet(
-            writer,
-            sheet_name="Rekonsiliasi",
-            df=rekon_df,
-            numeric_cols=[
-                "TIKET DETAIL ESPAY",
-                "SETTLEMENT DANA ESPAY",
-                "SELISIH TIKET DETAIL - SETTLEMENT",
-                "SETTLEMENT BCA",
-                "SETTLEMENT NON BCA",
-                "TOTAL SETTLEMENT",
-                "UANG MASUK BCA",
-                "UANG MASUK NON BCA",
-                "TOTAL UANG MASUK",
-                "SELISIH SETTLEMENT - UANG MASUK",
-            ],
-            date_cols=["TANGGAL"],
-            center_cols=["NO"],
-        )
-
-        if detail_tiket_df is not None and not detail_tiket_df.empty:
-            _write_styled_sheet(
-                writer,
-                sheet_name="Detail_Tiket",
-                df=detail_tiket_df,
-                numeric_cols=[c for c in detail_tiket_df.columns if c not in ("NO", "Tanggal")],
-                date_cols=["Tanggal"],
-                center_cols=["NO"],
-            )
-
-        if detail_settlement_df is not None and not detail_settlement_df.empty:
-            _write_styled_sheet(
-                writer,
-                sheet_name="Detail_Settlement",
-                df=detail_settlement_df,
-                numeric_cols=[c for c in detail_settlement_df.columns if c not in ("NO", "Tanggal")],
-                date_cols=["Tanggal"],
-                center_cols=["NO"],
-            )
-
-        if rincian_selisih_df is not None and not rincian_selisih_df.empty:
-            _write_styled_sheet(
-                writer,
-                sheet_name="Rincian_Selisih",
-                df=rincian_selisih_df,
-                numeric_cols=["TARIF TIKET DETAIL", "SETTLEMENT AMOUNT", "SELISIH"],
-                center_cols=["NO"],
-            )
-
-    return bio.getvalue()
-
-
 # ---------- App ----------
 
 st.set_page_config(page_title="Rekonsiliasi Tiket vs Settlement", layout="wide")
@@ -1119,8 +513,6 @@ st.markdown(
 
 if "HASIL" not in st.session_state:
     st.session_state["HASIL"] = {}
-if "LAST_PARAMS" not in st.session_state:
-    st.session_state["LAST_PARAMS"] = None
 
 with st.sidebar:
     st.header("1) Upload Sumber (multi-file)")
@@ -1151,36 +543,7 @@ with st.sidebar:
     y, m = _month_selector()
     month_start = pd.Timestamp(y, m, 1)
     month_end = pd.Timestamp(y, m, calendar.monthrange(y, m)[1])
-
-    st.header("3) Tanggal Tiket Detail")
-    ticket_date_source = st.selectbox(
-        "Kolom tanggal yang dipakai",
-        options=["Created", "Action"],
-        index=0,
-        help="Created: pakai Created saja. Action: mengikuti logic app awal, termasuk isi Action dari Created jika Action kosong.",
-    )
-
-    st.header("4) Zona Waktu Tiket Detail")
-    ticket_tz_mode = st.selectbox(
-        "Penyesuaian kolom Created",
-        options=["WIB", "WITA", "WIT"],
-        index=0,
-        help=(
-            "Hanya berlaku jika kolom tanggal yang dipakai adalah Created. "
-            "WIB: tidak ada penyesuaian. "
-            "WITA: Created jam 00:00:00-00:59:59 mundur 1 hari. "
-            "WIT: Created jam 00:00:00-01:59:59 mundur 1 hari."
-        ),
-        disabled=ticket_date_source == "Action",
-    )
-
-    params_fingerprint = f"{y}-{m:02d}-{ticket_date_source}-{ticket_tz_mode}"
-    last_params = st.session_state.get("LAST_PARAMS")
-    if last_params is not None and last_params != params_fingerprint:
-        st.session_state["HASIL"] = {}
-    st.session_state["LAST_PARAMS"] = params_fingerprint
-
-    st.caption(f"Periode dipakai: {month_start.date()} s/d {month_end.date()} | Kolom tanggal: {ticket_date_source} | Zona Created: {ticket_tz_mode}")
+    st.caption(f"Periode dipakai: {month_start.date()} s/d {month_end.date()}")
 
     go = st.button("Proses", type="primary", use_container_width=True)
 
@@ -1195,7 +558,7 @@ if go:
     rk_bca_inputs = _expand_zip(rk_bca_files)
     rk_non_inputs = _expand_zip(rk_non_files)
 
-    tiket_df = _concat_files(tiket_inputs, reader=_read_tiket_detail_any)
+    tiket_df = _concat_files(tiket_inputs)
     settle_df = _concat_files(settle_inputs)
     rk_bca_df = _concat_files(rk_bca_inputs)
     rk_non_df = _concat_rk_non(rk_non_inputs)
@@ -1208,25 +571,10 @@ if go:
         st.stop()
 
     # ---------------------- Tiket Detail (TABEL 1) ----------------------
-    t_action = _find_col(tiket_df, ["Action Date", "Action"])
-    t_created = _find_col(tiket_df, ["Created", "Created Date", "Created At", "Created Time"])
-
-    t_selected_date_col = _get_ticket_date_column(tiket_df, ticket_date_source)
-    if t_selected_date_col is None:
-        st.error(f"Kolom tanggal '{ticket_date_source}' tidak ditemukan pada Tiket Detail.")
+    t_date_action = _find_col(tiket_df, ["Action Date", "Action"])
+    if t_date_action is None:
+        st.error("Kolom tanggal 'Action Date' / 'Action' tidak ditemukan pada Tiket Detail.")
         st.stop()
-
-    tiket_df["__ticket_date__"] = _build_ticket_date_from_selected_source(
-        tiket_df,
-        date_source=ticket_date_source,
-        tz_mode=ticket_tz_mode,
-    )
-
-    if tiket_df["__ticket_date__"].notna().sum() == 0:
-        st.error(f"Kolom tanggal '{ticket_date_source}' ditemukan, tetapi tidak ada nilai tanggal yang valid.")
-        st.stop()
-
-    t_date_action = "__ticket_date__"
 
     t_amt_tarif = _find_col(tiket_df, ["Tarif", "tarif"])
     if t_amt_tarif is None:
@@ -1266,11 +614,15 @@ if go:
 
     # ------------------  TABEL 1: TIKET DETAIL ESPAY (PAID ONLY) -------------------
     td = tiket_df.copy()
-    td[t_date_action] = pd.to_datetime(td[t_date_action], errors="coerce")
+    t_created = _find_col(tiket_df, ["Created", "Created Date", "Created At", "Created Time"])
+    if t_created is not None:
+        td = _fill_action_from_created(td, t_date_action, t_created)
+
+    td[t_date_action] = pd.to_datetime(td[t_date_action].apply(_to_date), errors="coerce")
     td = td[~td[t_date_action].isna()]
 
-    td_bank_norm = td[t_bank].apply(_norm_str)
-    td_stat_norm = td[t_stat].apply(_norm_str)
+    td_bank_norm = td[t_bank].apply(_norm_token)
+    td_stat_norm = td[t_stat].apply(_norm_token)
     td = td[td_bank_norm.eq("espay") & td_stat_norm.eq("paid")]
     td = td[(td[t_date_action] >= month_start) & (td[t_date_action] <= month_end)]
 
@@ -1314,7 +666,7 @@ if go:
             bca[rk_tgl_bca] = bca[rk_tgl_bca].apply(_to_date)
             bca = bca[~bca[rk_tgl_bca].isna()]
             bca = bca[(bca[rk_tgl_bca] >= month_start) & (bca[rk_tgl_bca] <= month_end)]
-            ket_norm = bca[rk_ket_bca].astype(str).str.strip().str.lower()
+            ket_norm = bca[rk_ket_bca].astype(str).str.strip().str.lower().str.strip('"').str.strip("'")
             bca = bca[ket_norm.str.contains("mrc", na=False)]
             bca[rk_amt_bca] = _to_num(bca[rk_amt_bca])
             uang_masuk_bca = bca.groupby(bca[rk_tgl_bca].dt.date, dropna=True)[rk_amt_bca].sum()
@@ -1330,7 +682,7 @@ if go:
             nb[rk_tgl_non] = nb[rk_tgl_non].apply(_to_date)
             nb = nb[~nb[rk_tgl_non].isna()]
             nb = nb[(nb[rk_tgl_non] >= month_start) & (nb[rk_tgl_non] <= month_end)]
-            rem_norm = nb[rk_rem_non].astype(str).str.strip().str.lower()
+            rem_norm = nb[rk_rem_non].astype(str).str.strip().str.lower().str.strip('"').str.strip("'")
             nb = nb[rem_norm.str.contains("mrc", na=False)]
             nb[rk_amt_non] = _to_num(nb[rk_amt_non])
             uang_masuk_non = nb.groupby(nb[rk_tgl_non].dt.date, dropna=True)[rk_amt_non].sum()
@@ -1395,8 +747,49 @@ if go:
             continue
         fmt[c] = fmt[c].apply(_idr_fmt)
 
-    # ======================================================================
+    from openpyxl.styles import Alignment, Font
 
+    bio = io.BytesIO()
+    with pd.ExcelWriter(bio, engine="openpyxl") as xw:
+        view_total.to_excel(xw, index=False, sheet_name="Rekonsiliasi")
+        fmt.to_excel(xw, index=False, sheet_name="Rekonsiliasi_View")
+
+        wb = xw.book
+        ws = wb["Rekonsiliasi_View"]
+        ws.insert_rows(1)
+
+        sub_headers = [
+            "NO", "TANGGAL",
+            "TIKET DETAIL ESPAY", "SETTLEMENT DANA ESPAY", "SELISIH TIKET DETAIL - SETTLEMENT",
+            "BCA", "NON BCA", "TOTAL SETTLEMENT",
+            "BCA", "NON BCA", "TOTAL UANG MASUK",
+            "SELISIH SETTLEMENT - UANG MASUK",
+        ]
+        top_headers = [
+            "NO", "TANGGAL",
+            "TIKET DETAIL ESPAY", "SETTLEMENT DANA ESPAY", "SELISIH TIKET DETAIL - SETTLEMENT",
+            "SETTLEMENT", "SETTLEMENT", "TOTAL SETTLEMENT",
+            "UANG MASUK", "UANG MASUK", "TOTAL UANG MASUK",
+            "SELISIH SETTLEMENT - UANG MASUK",
+        ]
+
+        for col_idx, (top, sub) in enumerate(zip(top_headers, sub_headers), start=1):
+            ws.cell(row=1, column=col_idx, value=top)
+            ws.cell(row=2, column=col_idx, value=sub)
+
+        ws.merge_cells(start_row=1, start_column=6, end_row=1, end_column=7)
+        ws.merge_cells(start_row=1, start_column=9, end_row=1, end_column=10)
+
+        max_col = ws.max_column
+        for c in range(1, max_col + 1):
+            ws.cell(row=1, column=c).font = Font(bold=True)
+            ws.cell(row=2, column=c).font = Font(bold=True)
+            ws.cell(row=1, column=c).alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+            ws.cell(row=2, column=c).alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+        ws.row_dimensions[1].height = 22
+        ws.row_dimensions[2].height = 22
+
+    # ======================================================================
     # ===========  TABEL: DETAIL TIKET (GO SHOW × SUB-KATEGORI)  ===========
     # ======================================================================
 
@@ -1426,7 +819,7 @@ if go:
         )
         or _col_by_letter_local(tiket_df, "J")
     )
-    date_col = "__ticket_date__"
+    date_col = _find_col(tiket_df, ["Action Date", "Action"]) or _col_by_letter_local(tiket_df, "AG")
     tarif_col = _find_col(tiket_df, ["Tarif", "tarif"]) or _col_by_letter_local(tiket_df, "Y")
     status_col = _find_col(tiket_df, ["St Bayar", "Status Bayar", "status", "status bayar"])
 
@@ -1435,7 +828,7 @@ if go:
             ("TYPE (kolom B)", type_main_col),
             ("BANK (kolom I)", bank_col),
             ("TIPE / SUB-TIPE (kolom J)", type_sub_col),
-            (f"TANGGAL PILIHAN ({ticket_date_source})", date_col),
+            ("ACTION/Action Date (kolom AG)", date_col),
             ("TARIF (kolom Y)", tarif_col),
             ("ST BAYAR / STATUS BAYAR", status_col),
         ]
@@ -1447,12 +840,15 @@ if go:
         st.warning("Kolom wajib untuk tabel 'Detail Tiket (GO SHOW/ONLINE) [PAID]' belum lengkap: " + ", ".join(required_missing))
     else:
         tix = tiket_df.copy()
-        tix[date_col] = pd.to_datetime(tix[date_col], errors="coerce")
+        if t_created is not None:
+            tix = _fill_action_from_created(tix, date_col, t_created)
+
+        tix[date_col] = pd.to_datetime(tix[date_col].apply(_to_date), errors="coerce")
         tix = tix[~tix[date_col].isna()]
         tix = tix[(tix[date_col] >= month_start) & (tix[date_col] <= month_end)]
 
-        stat_norm = tix[status_col].apply(_norm_str)
-        tix = tix[stat_norm.eq("paid") | stat_norm.str.contains(r"\bpaid\b", na=False)]
+        stat_norm = tix[status_col].apply(_norm_token)
+        tix = tix[stat_norm.eq("paid") | stat_norm.str.contains(r"paid", na=False)]
 
         main_norm_all = tix[type_main_col].apply(_norm_str)
         sub_norm_all = tix[type_sub_col].apply(_norm_str)
@@ -1575,6 +971,7 @@ if go:
     # ======================================================================
 
     detail_settle_table = None
+    detail_settle_excel_bytes = None
 
     s_order = _find_col(settle_df, ["Order ID", "OrderId", "Order Number", "Order No", "OrderID", "order id"])
     miss = [n for n, c in [
@@ -1676,12 +1073,83 @@ if go:
         df3_fmt_mi.columns = pd.MultiIndex.from_tuples(top3)
         detail_settle_table = df3_fmt_mi
 
+        from openpyxl.styles import Alignment, Font
+        from openpyxl.utils import get_column_letter
+
+        bio_settle = io.BytesIO()
+        with pd.ExcelWriter(bio_settle, engine="openpyxl") as xw3:
+            df3.to_excel(xw3, index=False, sheet_name="Detail_Settlement")
+
+            wsname3 = "Detail_Settlement_View"
+            df3_fmt.to_excel(xw3, index=False, header=False, sheet_name=wsname3, startrow=2)
+            wb3 = xw3.book
+            ws3 = wb3[wsname3]
+
+            cols3 = list(df3.columns)
+            top_headers = []
+            sub_headers = []
+            for c in cols3:
+                if c in ("NO", "Tanggal"):
+                    top_headers.append("")
+                    sub_headers.append(c)
+                elif str(c).startswith("GS|"):
+                    top_headers.append("GO SHOW")
+                    sub_headers.append(str(c)[3:])
+                elif str(c).startswith("ON|"):
+                    top_headers.append("ONLINE")
+                    sub_headers.append(str(c)[3:])
+                else:
+                    top_headers.append("")
+                    sub_headers.append(str(c))
+
+            for j, (top, sub) in enumerate(zip(top_headers, sub_headers), start=1):
+                ws3.cell(row=1, column=j, value=top)
+                ws3.cell(row=2, column=j, value=sub)
+
+            def _merge_same_run(labels, row_idx):
+                start = 0
+                while start < len(labels):
+                    end = start
+                    while end + 1 < len(labels) and labels[end + 1] == labels[start]:
+                        end += 1
+                    label = labels[start]
+                    if label not in ("", None) and end >= start:
+                        ws3.merge_cells(start_row=row_idx, start_column=start + 1, end_row=row_idx, end_column=end + 1)
+                    start = end + 1
+
+            _merge_same_run(top_headers, row_idx=1)
+
+            for j, top in enumerate(top_headers, start=1):
+                if top == "":
+                    ws3.merge_cells(start_row=1, start_column=j, end_row=2, end_column=j)
+
+            max_col = len(cols3)
+            for ccol in range(1, max_col + 1):
+                ws3.cell(row=1, column=ccol).font = Font(bold=True)
+                ws3.cell(row=2, column=ccol).font = Font(bold=True)
+                ws3.cell(row=1, column=ccol).alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+                ws3.cell(row=2, column=ccol).alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+            ws3.row_dimensions[1].height = 22
+            ws3.row_dimensions[2].height = 22
+
+            sample_rows = min(50, df3_fmt.shape[0])
+            for idx_col, col_name in enumerate(cols3, start=1):
+                max_len = max(len(str(col_name)), len(str(sub_headers[idx_col - 1])), len(str(top_headers[idx_col - 1])))
+                for r in range(3, 3 + sample_rows):
+                    v = ws3.cell(row=r, column=idx_col).value
+                    if v is not None:
+                        max_len = max(max_len, len(str(v)))
+                ws3.column_dimensions[get_column_letter(idx_col)].width = min(max(10, max_len + 2), 45)
+
+        detail_settle_excel_bytes = bio_settle.getvalue()
+
 
     # ======================================================================
     # ========================  RINCIAN SELISIH ORDER ID  ===================
     # ======================================================================
 
     rincian_selisih_table = None
+    rincian_selisih_excel_bytes = None
 
     t_order = _find_col(tiket_df, ["Order ID", "OrderId", "Order No", "Order Number", "OrderID"])
     s_order_rincian = _find_col(settle_df, ["Order ID", "OrderId", "Order Number", "Order No", "OrderID", "order id"])
@@ -1689,7 +1157,7 @@ if go:
 
     miss_rincian = [n for n, c in [
         ("Order ID Tiket Detail", t_order),
-        ("Created / Action Date / Action", t_date_action),
+        ("Action Date / Action", t_date_action),
         ("St Bayar / Status Bayar", t_stat),
         ("Bank", t_bank),
         ("Tarif", t_amt_tarif),
@@ -1702,12 +1170,15 @@ if go:
         st.warning("Kolom untuk 'RINCIAN SELISIH' belum lengkap: " + ", ".join(miss_rincian))
     else:
         td_gap = tiket_df.copy()
-        td_gap[t_date_action] = pd.to_datetime(td_gap[t_date_action], errors="coerce")
+        if t_created is not None:
+            td_gap = _fill_action_from_created(td_gap, t_date_action, t_created)
+
+        td_gap[t_date_action] = pd.to_datetime(td_gap[t_date_action].apply(_to_date), errors="coerce")
         td_gap = td_gap[~td_gap[t_date_action].isna()]
         td_gap = td_gap[(td_gap[t_date_action] >= month_start) & (td_gap[t_date_action] <= month_end)]
 
-        bank_mask = td_gap[t_bank].apply(_norm_str).str.contains("espay", na=False)
-        paid_mask = td_gap[t_stat].apply(_norm_str).eq("paid")
+        bank_mask = td_gap[t_bank].apply(_norm_token).str.contains("espay", na=False)
+        paid_mask = td_gap[t_stat].apply(_norm_token).eq("paid")
         td_gap = td_gap[bank_mask & paid_mask].copy()
 
         td_gap[t_amt_tarif] = _to_num(td_gap[t_amt_tarif])
@@ -1733,13 +1204,6 @@ if go:
         settle_order_cmp = sd_gap.groupby("__order_key__", as_index=False).agg(
             ORDER_ID_SETTLEMENT=("__order_display__", _first_nonempty_text),
             SETTLEMENT_AMOUNT=(s_amt_legacy, "sum"),
-        )
-
-        tiket_order_cmp["__order_key__"] = (
-            tiket_order_cmp["__order_key__"].fillna("").astype(str)
-        )
-        settle_order_cmp["__order_key__"] = (
-            settle_order_cmp["__order_key__"].fillna("").astype(str)
         )
 
         rincian_cmp = tiket_order_cmp.merge(settle_order_cmp, on="__order_key__", how="outer")
@@ -1787,47 +1251,40 @@ if go:
         for c in ["TARIF TIKET DETAIL", "SETTLEMENT AMOUNT", "SELISIH"]:
             rincian_fmt[c] = rincian_fmt[c].apply(_idr_fmt)
 
-        rincian_selisih_table = rincian_fmt
+        bio_gap = io.BytesIO()
+        with pd.ExcelWriter(bio_gap, engine="openpyxl") as xw_gap:
+            rincian_view.to_excel(xw_gap, index=False, sheet_name="Rincian_Selisih")
+            rincian_fmt.to_excel(xw_gap, index=False, sheet_name="Rincian_Selisih_View")
 
-    combined_excel_bytes = _build_combined_excel(
-        rekon_df=view_total,
-        detail_tiket_df=df2 if df2_fmt_mi is not None else None,
-        detail_settlement_df=df3 if detail_settle_table is not None else None,
-        rincian_selisih_df=rincian_view if rincian_selisih_table is not None else None,
-    )
+        rincian_selisih_table = rincian_fmt
+        rincian_selisih_excel_bytes = bio_gap.getvalue()
 
     periode = f"{y}-{m:02d}"
-    zona_waktu = ticket_tz_mode
-    st.session_state["HASIL"]["rekon"] = {
-        "periode": periode,
-        "zona_waktu": zona_waktu,
-        "table": fmt,
-        "excel_bytes": combined_excel_bytes,
-    }
+    st.session_state["HASIL"]["rekon"] = {"periode": periode, "table": fmt, "excel_bytes": bio.getvalue()}
     if df2_fmt_mi is not None:
-        st.session_state["HASIL"]["detail_tiket"] = {"periode": periode, "zona_waktu": zona_waktu, "table": df2_fmt_mi}
+        st.session_state["HASIL"]["detail_tiket"] = {"periode": periode, "table": df2_fmt_mi}
     else:
         st.session_state["HASIL"].pop("detail_tiket", None)
 
-    if detail_settle_table is not None:
+    if detail_settle_table is not None and detail_settle_excel_bytes is not None:
         st.session_state["HASIL"]["detail_settlement"] = {
             "periode": periode,
-            "zona_waktu": zona_waktu,
             "table": detail_settle_table,
+            "excel_bytes": detail_settle_excel_bytes,
         }
     else:
         st.session_state["HASIL"].pop("detail_settlement", None)
 
-    if rincian_selisih_table is not None:
+    if rincian_selisih_table is not None and rincian_selisih_excel_bytes is not None:
         st.session_state["HASIL"]["rincian_selisih"] = {
             "periode": periode,
-            "zona_waktu": zona_waktu,
             "table": rincian_selisih_table,
+            "excel_bytes": rincian_selisih_excel_bytes,
         }
     else:
         st.session_state["HASIL"].pop("rincian_selisih", None)
 
-    st.success("Proses selesai. Hasil tersimpan.")
+    st.success("Proses selesai. Hasil tersimpan (klik download tidak perlu proses ulang).")
 
 
 # =========================
@@ -1838,33 +1295,51 @@ hasil = st.session_state.get("HASIL", {})
 
 if "rekon" in hasil:
     st.subheader("Hasil Rekonsiliasi per Tanggal (mengikuti bulan parameter)")
-    st.caption(f"Periode tersimpan: {hasil['rekon']['periode']} | Zona waktu Created: {hasil['rekon'].get('zona_waktu', 'WIB')}")
+    st.caption(f"Periode tersimpan: {hasil['rekon']['periode']}")
     st.dataframe(_style_right(hasil["rekon"]["table"]), use_container_width=True, hide_index=True)
 
     st.download_button(
-        "Unduh Excel Gabungan",
+        "Unduh Excel Rekonsiliasi",
         data=hasil["rekon"]["excel_bytes"],
-        file_name=f"rekonsiliasi_gabungan_{hasil['rekon']['periode']}.xlsx",
+        file_name=f"rekonsiliasi_{hasil['rekon']['periode']}.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         use_container_width=True,
-        key="dl_rekon_gabungan",
+        key="dl_rekon",
     )
 
 if "detail_tiket" in hasil:
     st.subheader("Detail Tiket per Tanggal — TYPE: GO SHOW & ONLINE × SUB-TIPE (J) [HANYA PAID]")
-    st.caption(f"Periode tersimpan: {hasil['detail_tiket']['periode']} | Zona waktu Created: {hasil['detail_tiket'].get('zona_waktu', 'WIB')}")
+    st.caption(f"Periode tersimpan: {hasil['detail_tiket']['periode']}")
     st.dataframe(_style_right(hasil["detail_tiket"]["table"]), use_container_width=True, hide_index=True)
 
 if "detail_settlement" in hasil:
     st.subheader("DETAIL SETTLEMENT REPORT")
-    st.caption(f"Periode tersimpan: {hasil['detail_settlement']['periode']} | Zona waktu Created: {hasil['detail_settlement'].get('zona_waktu', 'WIB')}")
+    st.caption(f"Periode tersimpan: {hasil['detail_settlement']['periode']}")
     st.dataframe(_style_right(hasil["detail_settlement"]["table"]), use_container_width=True, hide_index=True)
+
+    st.download_button(
+        "Unduh Excel (Detail Settlement)",
+        data=hasil["detail_settlement"]["excel_bytes"],
+        file_name=f"detail_settlement_{hasil['detail_settlement']['periode']}.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        use_container_width=True,
+        key="dl_detail_settlement",
+    )
 
 
 if "rincian_selisih" in hasil:
     st.subheader("RINCIAN SELISIH ORDER ID — Tiket Detail vs Settlement Dana")
-    st.caption(f"Periode tersimpan: {hasil['rincian_selisih']['periode']} | Zona waktu Created: {hasil['rincian_selisih'].get('zona_waktu', 'WIB')}")
+    st.caption(f"Periode tersimpan: {hasil['rincian_selisih']['periode']}")
     st.dataframe(_style_right(hasil["rincian_selisih"]["table"]), use_container_width=True, hide_index=True)
+
+    st.download_button(
+        "Unduh Excel (Rincian Selisih)",
+        data=hasil["rincian_selisih"]["excel_bytes"],
+        file_name=f"rincian_selisih_{hasil['rincian_selisih']['periode']}.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        use_container_width=True,
+        key="dl_rincian_selisih",
+    )
 
 if not hasil:
     st.info("Silakan upload file, pilih bulan-tahun, lalu klik **Proses**.")
