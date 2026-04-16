@@ -1098,11 +1098,13 @@ if go:
             + s_on_varetail_espay.reindex(idx_match, fill_value=0.0)
         )
 
-        cocok_mask = np.isclose(
-            total_settle_ser.reindex(idx_match, fill_value=0.0).to_numpy(dtype=float),
-            total_uang_masuk_ser.reindex(idx_match, fill_value=0.0).to_numpy(dtype=float),
-            atol=0.5,
-        )
+        # Revisi:
+        # - ESPAY dibandingkan memakai Settlement Date
+        # - RK dibandingkan memakai kolom Tanggal/Date RK
+        # - Jika tanggal yang sama ada di kedua sisi, tampilkan nominal kategori di tabel ini
+        settle_date_has_value = total_settle_ser.reindex(idx_match, fill_value=0.0).to_numpy(dtype=float) != 0
+        rk_date_has_value = total_uang_masuk_ser.reindex(idx_match, fill_value=0.0).to_numpy(dtype=float) != 0
+        cocok_mask = settle_date_has_value & rk_date_has_value
 
         rekap_match = pd.DataFrame(index=idx_match)
         rekap_match["Tanggal Create"] = idx_match
@@ -1492,7 +1494,7 @@ if "detail_tiket" in hasil:
     st.dataframe(_style_right(hasil["detail_tiket"]["table"]), use_container_width=True, hide_index=True)
 
 if "rekap_cocok" in hasil:
-    st.subheader("Rekap Cocok RK × Settlement Espay (Akumulasi per Tanggal)")
+    st.subheader("Rekap Cocok RK × Settlement Espay (Tanggal Settlement = Tanggal RK)")
     st.caption(f"Periode tersimpan: {hasil['rekap_cocok']['periode']}")
     st.dataframe(_style_right(hasil["rekap_cocok"]["table"]), use_container_width=True, hide_index=True)
 
