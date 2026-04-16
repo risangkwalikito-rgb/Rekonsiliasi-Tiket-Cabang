@@ -1069,40 +1069,63 @@ if go:
 
     rekap_cocok_table = None
 
-    if df2_fmt_mi is not None:
+    s_order_rekap = _find_col(settle_df, ["Order ID", "OrderId", "Order Number", "Order No", "OrderID", "order id"])
+    if s_date_E and s_amt_L and s_prod_P and s_order_rekap:
         idx_match = pd.Index(pd.date_range(month_start, month_end, freq="D").date, name="Tanggal")
 
-        gs_cash_ser = s_gs_cash_asdp.reindex(idx_match, fill_value=0.0)
+        sd_match = settle_df.copy()
+        sd_match[s_date_E] = sd_match[s_date_E].apply(_to_date)
+        sd_match = sd_match[~sd_match[s_date_E].isna()]
+        sd_match = sd_match[(sd_match[s_date_E] >= month_start) & (sd_match[s_date_E] <= month_end)]
+        sd_match[s_amt_L] = _to_num(sd_match[s_amt_L])
+
+        prod_raw_match = sd_match[s_prod_P]
+        prod_norm_match = prod_raw_match.astype(str).str.strip().str.casefold()
+        order_norm_match = sd_match[s_order_rekap].astype(str).str.strip().str.casefold()
+
+        go_show_mask_match = order_norm_match.str.endswith("_ord") | (~order_norm_match.str.startswith("ord") & order_norm_match.str.endswith("ord"))
+        online_mask_match = order_norm_match.str.startswith("ord")
+
+        is_bca_va_match = prod_raw_match.apply(_is_bca_va_product)
+        has_va_match = prod_norm_match.str.contains("va", na=False) | is_bca_va_match
+        non_bca_va_match = has_va_match & ~is_bca_va_match
+        is_emoney_match = ~has_va_match
+
+        # Asumsi mapping settlement -> tabel rekap:
+        # - GO SHOW PREPAID = GO SHOW VA BCA
+        # - GO SHOW NON BCA = GO SHOW VA NON BCA + GO SHOW E-MONEY
+        # - ONLINE NON BCA = ONLINE VA NON BCA + ONLINE E-MONEY
+        # - GO SHOW CASH = 0, karena tidak muncul sebagai kategori settlement espay
+        gs_cash_ser = pd.Series(0.0, index=idx_match, dtype=float)
         gs_prepaid_ser = (
-            s_gs_prepaid_bca.reindex(idx_match, fill_value=0.0)
-            + s_gs_prepaid_bri.reindex(idx_match, fill_value=0.0)
-            + s_gs_prepaid_bni.reindex(idx_match, fill_value=0.0)
-            + s_gs_prepaid_mandiri.reindex(idx_match, fill_value=0.0)
+            sd_match.loc[go_show_mask_match & is_bca_va_match]
+            .groupby(sd_match[s_date_E].dt.date, dropna=True)[s_amt_L]
+            .sum()
+            .reindex(idx_match, fill_value=0.0)
         )
-
-        # Asumsi versi awal:
-        # - GO SHOW NON BCA = transaksi ESPAY GO SHOW non-prepaid/non-cash
-        # - ONLINE NON BCA = transaksi ESPAY ONLINE non-cash
         gs_non_bca_ser = (
-            s_gs_emoney_espay.reindex(idx_match, fill_value=0.0)
-            + s_gs_varetail_espay.reindex(idx_match, fill_value=0.0)
-            + s_gs_tf_ptpos.reindex(idx_match, fill_value=0.0)
-            + s_gs_tf_bri.reindex(idx_match, fill_value=0.0)
-            + s_gs_tf_bni.reindex(idx_match, fill_value=0.0)
-            + s_gs_tf_mandiri.reindex(idx_match, fill_value=0.0)
-            + s_gs_tf_bca.reindex(idx_match, fill_value=0.0)
+            sd_match.loc[go_show_mask_match & (non_bca_va_match | is_emoney_match)]
+            .groupby(sd_match[s_date_E].dt.date, dropna=True)[s_amt_L]
+            .sum()
+            .reindex(idx_match, fill_value=0.0)
         )
-
         on_non_bca_ser = (
-            s_on_emoney_espay.reindex(idx_match, fill_value=0.0)
-            + s_on_varetail_espay.reindex(idx_match, fill_value=0.0)
+            sd_match.loc[online_mask_match & (non_bca_va_match | is_emoney_match)]
+            .groupby(sd_match[s_date_E].dt.date, dropna=True)[s_amt_L]
+            .sum()
+            .reindex(idx_match, fill_value=0.0)
         )
 
-        # Revisi:
-        # - ESPAY dibandingkan memakai Settlement Date
-        # - RK dibandingkan memakai kolom Tanggal/Date RK
-        # - Jika tanggal yang sama ada di kedua sisi, tampilkan nominal kategori di tabel ini
-        settle_date_has_value = total_settle_ser.reindex(idx_match, fill_value=0.0).to_numpy(dtype=float) != 0
+        # Cocok by date:
+        # - Settlement Espay pakai Settlement Date
+        # - RK pakai kolom Tanggal/Date RK
+        # - Jika tanggal sama-sama ada di kedua sisi, tampilkan nominal settlement pada tanggal itu
+        settle_date_has_value = (
+            (gs_cash_ser + gs_prepaid_ser + gs_non_bca_ser + on_non_bca_ser)
+            .reindex(idx_match, fill_value=0.0)
+            .to_numpy(dtype=float)
+            != 0
+        )
         rk_date_has_value = total_uang_masuk_ser.reindex(idx_match, fill_value=0.0).to_numpy(dtype=float) != 0
         cocok_mask = settle_date_has_value & rk_date_has_value
 
@@ -1494,7 +1517,7 @@ if "detail_tiket" in hasil:
     st.dataframe(_style_right(hasil["detail_tiket"]["table"]), use_container_width=True, hide_index=True)
 
 if "rekap_cocok" in hasil:
-    st.subheader("Rekap Cocok RK × Settlement Espay (Tanggal Settlement = Tanggal RK)")
+    st.subheader("Rekap Cocok RK × Settlement Espay (Berbasis Settlement + RK)")
     st.caption(f"Periode tersimpan: {hasil['rekap_cocok']['periode']}")
     st.dataframe(_style_right(hasil["rekap_cocok"]["table"]), use_container_width=True, hide_index=True)
 
