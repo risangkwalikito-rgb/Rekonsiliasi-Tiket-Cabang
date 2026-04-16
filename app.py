@@ -1064,6 +1064,83 @@ if go:
         df2_fmt_mi.columns = pd.MultiIndex.from_tuples(top)
 
     # ======================================================================
+    # =======  REKAP COCOK RK x SETTLEMENT ESPAY (AKUMULASI TANGGAL)  =======
+    # ======================================================================
+
+    rekap_cocok_table = None
+
+    if df2_fmt_mi is not None:
+        idx_match = pd.Index(pd.date_range(month_start, month_end, freq="D").date, name="Tanggal")
+
+        gs_cash_ser = s_gs_cash_asdp.reindex(idx_match, fill_value=0.0)
+        gs_prepaid_ser = (
+            s_gs_prepaid_bca.reindex(idx_match, fill_value=0.0)
+            + s_gs_prepaid_bri.reindex(idx_match, fill_value=0.0)
+            + s_gs_prepaid_bni.reindex(idx_match, fill_value=0.0)
+            + s_gs_prepaid_mandiri.reindex(idx_match, fill_value=0.0)
+        )
+
+        # Asumsi versi awal:
+        # - GO SHOW NON BCA = transaksi ESPAY GO SHOW non-prepaid/non-cash
+        # - ONLINE NON BCA = transaksi ESPAY ONLINE non-cash
+        gs_non_bca_ser = (
+            s_gs_emoney_espay.reindex(idx_match, fill_value=0.0)
+            + s_gs_varetail_espay.reindex(idx_match, fill_value=0.0)
+            + s_gs_tf_ptpos.reindex(idx_match, fill_value=0.0)
+            + s_gs_tf_bri.reindex(idx_match, fill_value=0.0)
+            + s_gs_tf_bni.reindex(idx_match, fill_value=0.0)
+            + s_gs_tf_mandiri.reindex(idx_match, fill_value=0.0)
+            + s_gs_tf_bca.reindex(idx_match, fill_value=0.0)
+        )
+
+        on_non_bca_ser = (
+            s_on_emoney_espay.reindex(idx_match, fill_value=0.0)
+            + s_on_varetail_espay.reindex(idx_match, fill_value=0.0)
+        )
+
+        cocok_mask = np.isclose(
+            total_settle_ser.reindex(idx_match, fill_value=0.0).to_numpy(dtype=float),
+            total_uang_masuk_ser.reindex(idx_match, fill_value=0.0).to_numpy(dtype=float),
+            atol=0.5,
+        )
+
+        rekap_match = pd.DataFrame(index=idx_match)
+        rekap_match["Tanggal Create"] = idx_match
+        rekap_match["GO SHOW - CASH"] = np.where(cocok_mask, gs_cash_ser.values, 0.0)
+        rekap_match["GO SHOW - PREPAID"] = np.where(cocok_mask, gs_prepaid_ser.values, 0.0)
+        rekap_match["GO SHOW - NON BCA"] = np.where(cocok_mask, gs_non_bca_ser.values, 0.0)
+        rekap_match["ONLINE - NON BCA"] = np.where(cocok_mask, on_non_bca_ser.values, 0.0)
+
+        rekap_match = rekap_match.reset_index(drop=True)
+        rekap_match.insert(0, "NO", range(1, len(rekap_match) + 1))
+
+        total_row_match = pd.DataFrame([{
+            "NO": "",
+            "Tanggal Create": "TOTAL",
+            "GO SHOW - CASH": float(rekap_match["GO SHOW - CASH"].sum()),
+            "GO SHOW - PREPAID": float(rekap_match["GO SHOW - PREPAID"].sum()),
+            "GO SHOW - NON BCA": float(rekap_match["GO SHOW - NON BCA"].sum()),
+            "ONLINE - NON BCA": float(rekap_match["ONLINE - NON BCA"].sum()),
+        }])
+
+        rekap_match = pd.concat([rekap_match, total_row_match], ignore_index=True)
+
+        rekap_match_fmt = rekap_match.copy()
+        for c in ["GO SHOW - CASH", "GO SHOW - PREPAID", "GO SHOW - NON BCA", "ONLINE - NON BCA"]:
+            rekap_match_fmt[c] = rekap_match_fmt[c].apply(_idr_fmt)
+
+        top_match = [
+            ("", "NO"),
+            ("", "Tanggal Create"),
+            ("Go Show", "Cash"),
+            ("Go Show", "PREPAID"),
+            ("Go Show", "NON BCA"),
+            ("ONLINE", "NON BCA"),
+        ]
+        rekap_cocok_table = rekap_match_fmt.copy()
+        rekap_cocok_table.columns = pd.MultiIndex.from_tuples(top_match)
+
+    # ======================================================================
     # ===================  TABEL: DETAIL SETTLEMENT REPORT  =================
     # ======================================================================
 
@@ -1360,6 +1437,14 @@ if go:
     else:
         st.session_state["HASIL"].pop("detail_tiket", None)
 
+    if rekap_cocok_table is not None:
+        st.session_state["HASIL"]["rekap_cocok"] = {
+            "periode": periode,
+            "table": rekap_cocok_table,
+        }
+    else:
+        st.session_state["HASIL"].pop("rekap_cocok", None)
+
     if detail_settle_table is not None and detail_settle_excel_bytes is not None:
         st.session_state["HASIL"]["detail_settlement"] = {
             "periode": periode,
@@ -1405,6 +1490,11 @@ if "detail_tiket" in hasil:
     st.subheader("Detail Tiket per Tanggal — TYPE: GO SHOW & ONLINE × SUB-TIPE (J) [HANYA PAID]")
     st.caption(f"Periode tersimpan: {hasil['detail_tiket']['periode']}")
     st.dataframe(_style_right(hasil["detail_tiket"]["table"]), use_container_width=True, hide_index=True)
+
+if "rekap_cocok" in hasil:
+    st.subheader("Rekap Cocok RK × Settlement Espay (Akumulasi per Tanggal)")
+    st.caption(f"Periode tersimpan: {hasil['rekap_cocok']['periode']}")
+    st.dataframe(_style_right(hasil["rekap_cocok"]["table"]), use_container_width=True, hide_index=True)
 
 if "detail_settlement" in hasil:
     st.subheader("DETAIL SETTLEMENT REPORT")
