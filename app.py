@@ -1064,7 +1064,7 @@ if go:
         df2_fmt_mi.columns = pd.MultiIndex.from_tuples(top)
 
     # ======================================================================
-    # =======  REKAP COCOK RK x SETTLEMENT ESPAY (AKUMULASI TANGGAL)  =======
+    # =======  DETAIL SETTLEMENT x REKENING KORAN (AKUMULASI TANGGAL)  =======
     # ======================================================================
 
     rekap_cocok_table = None
@@ -1091,11 +1091,7 @@ if go:
         non_bca_va_match = has_va_match & ~is_bca_va_match
         is_emoney_match = ~has_va_match
 
-        # Asumsi mapping settlement -> tabel rekap:
-        # - GO SHOW PREPAID = GO SHOW VA BCA
-        # - GO SHOW NON BCA = GO SHOW VA NON BCA + GO SHOW E-MONEY
-        # - ONLINE NON BCA = ONLINE VA NON BCA + ONLINE E-MONEY
-        # - GO SHOW CASH = 0, karena tidak muncul sebagai kategori settlement espay
+        # Basis angka dari Settlement Espay (Settlement Date)
         gs_cash_ser = pd.Series(0.0, index=idx_match, dtype=float)
         gs_prepaid_ser = (
             sd_match.loc[go_show_mask_match & is_bca_va_match]
@@ -1115,26 +1111,49 @@ if go:
             .sum()
             .reindex(idx_match, fill_value=0.0)
         )
+        gs_bca_ser = (
+            sd_match.loc[go_show_mask_match & is_bca_va_match]
+            .groupby(sd_match[s_date_E].dt.date, dropna=True)[s_amt_L]
+            .sum()
+            .reindex(idx_match, fill_value=0.0)
+        )
+        on_bca_ser = (
+            sd_match.loc[online_mask_match & is_bca_va_match]
+            .groupby(sd_match[s_date_E].dt.date, dropna=True)[s_amt_L]
+            .sum()
+            .reindex(idx_match, fill_value=0.0)
+        )
 
-        # Cocok by date:
-        # - Settlement Espay pakai Settlement Date
-        # - RK pakai kolom Tanggal/Date RK
-        # - Jika tanggal sama-sama ada di kedua sisi, tampilkan nominal settlement pada tanggal itu
-        settle_date_has_value = (
-            (gs_cash_ser + gs_prepaid_ser + gs_non_bca_ser + on_non_bca_ser)
+        # Match by date:
+        # - kolom NON BCA memakai RK NON BCA
+        # - kolom BCA memakai RK BCA
+        rk_non_date_has_value = uang_masuk_non_ser.reindex(idx_match, fill_value=0.0).to_numpy(dtype=float) != 0
+        rk_bca_date_has_value = uang_masuk_bca_ser.reindex(idx_match, fill_value=0.0).to_numpy(dtype=float) != 0
+
+        settlement_non_date_has_value = (
+            (gs_cash_ser + gs_non_bca_ser + on_non_bca_ser)
             .reindex(idx_match, fill_value=0.0)
             .to_numpy(dtype=float)
             != 0
         )
-        rk_date_has_value = total_uang_masuk_ser.reindex(idx_match, fill_value=0.0).to_numpy(dtype=float) != 0
-        cocok_mask = settle_date_has_value & rk_date_has_value
+        settlement_bca_date_has_value = (
+            (gs_prepaid_ser + gs_bca_ser + on_bca_ser)
+            .reindex(idx_match, fill_value=0.0)
+            .to_numpy(dtype=float)
+            != 0
+        )
+
+        cocok_non_mask = settlement_non_date_has_value & rk_non_date_has_value
+        cocok_bca_mask = settlement_bca_date_has_value & rk_bca_date_has_value
 
         rekap_match = pd.DataFrame(index=idx_match)
         rekap_match["Tanggal Create"] = idx_match
-        rekap_match["GO SHOW - CASH"] = np.where(cocok_mask, gs_cash_ser.values, 0.0)
-        rekap_match["GO SHOW - PREPAID"] = np.where(cocok_mask, gs_prepaid_ser.values, 0.0)
-        rekap_match["GO SHOW - NON BCA"] = np.where(cocok_mask, gs_non_bca_ser.values, 0.0)
-        rekap_match["ONLINE - NON BCA"] = np.where(cocok_mask, on_non_bca_ser.values, 0.0)
+        rekap_match["GO SHOW - CASH"] = np.where(cocok_non_mask, gs_cash_ser.values, 0.0)
+        rekap_match["GO SHOW - PREPAID"] = np.where(cocok_bca_mask, gs_prepaid_ser.values, 0.0)
+        rekap_match["GO SHOW - NON BCA"] = np.where(cocok_non_mask, gs_non_bca_ser.values, 0.0)
+        rekap_match["GO SHOW - BCA"] = np.where(cocok_bca_mask, gs_bca_ser.values, 0.0)
+        rekap_match["ONLINE - NON BCA"] = np.where(cocok_non_mask, on_non_bca_ser.values, 0.0)
+        rekap_match["ONLINE - BCA"] = np.where(cocok_bca_mask, on_bca_ser.values, 0.0)
 
         rekap_match = rekap_match.reset_index(drop=True)
         rekap_match.insert(0, "NO", range(1, len(rekap_match) + 1))
@@ -1145,13 +1164,22 @@ if go:
             "GO SHOW - CASH": float(rekap_match["GO SHOW - CASH"].sum()),
             "GO SHOW - PREPAID": float(rekap_match["GO SHOW - PREPAID"].sum()),
             "GO SHOW - NON BCA": float(rekap_match["GO SHOW - NON BCA"].sum()),
+            "GO SHOW - BCA": float(rekap_match["GO SHOW - BCA"].sum()),
             "ONLINE - NON BCA": float(rekap_match["ONLINE - NON BCA"].sum()),
+            "ONLINE - BCA": float(rekap_match["ONLINE - BCA"].sum()),
         }])
 
         rekap_match = pd.concat([rekap_match, total_row_match], ignore_index=True)
 
         rekap_match_fmt = rekap_match.copy()
-        for c in ["GO SHOW - CASH", "GO SHOW - PREPAID", "GO SHOW - NON BCA", "ONLINE - NON BCA"]:
+        for c in [
+            "GO SHOW - CASH",
+            "GO SHOW - PREPAID",
+            "GO SHOW - NON BCA",
+            "GO SHOW - BCA",
+            "ONLINE - NON BCA",
+            "ONLINE - BCA",
+        ]:
             rekap_match_fmt[c] = rekap_match_fmt[c].apply(_idr_fmt)
 
         top_match = [
@@ -1160,7 +1188,9 @@ if go:
             ("Go Show", "Cash"),
             ("Go Show", "PREPAID"),
             ("Go Show", "NON BCA"),
+            ("Go Show", "BCA"),
             ("ONLINE", "NON BCA"),
+            ("ONLINE", "BCA"),
         ]
         rekap_cocok_table = rekap_match_fmt.copy()
         rekap_cocok_table.columns = pd.MultiIndex.from_tuples(top_match)
@@ -1517,7 +1547,7 @@ if "detail_tiket" in hasil:
     st.dataframe(_style_right(hasil["detail_tiket"]["table"]), use_container_width=True, hide_index=True)
 
 if "rekap_cocok" in hasil:
-    st.subheader("Detail Settlement x Rekening Koran Non BCA")
+    st.subheader("Detail Settlement x Rekening Koran saja")
     st.caption(f"Periode tersimpan: {hasil['rekap_cocok']['periode']}")
     st.dataframe(_style_right(hasil["rekap_cocok"]["table"]), use_container_width=True, hide_index=True)
 
