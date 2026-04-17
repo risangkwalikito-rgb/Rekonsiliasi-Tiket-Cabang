@@ -960,6 +960,7 @@ if go:
         m_emoney_all = (sub_norm_all == "e-money") | sub_norm_all.str.contains(r"\be[-\s]*money\b|\bemoney\b", na=False)
         m_varetail_all = sub_norm_all.str.contains(r"virtual\s*account", na=False) & sub_norm_all.str.contains(r"gerai|retail", na=False)
         m_cash_all = (sub_norm_all == "cash") | sub_norm_all.str.contains(r"\bcash\b", na=False)
+        m_tmanual_all = (sub_norm_all == "tmanual") | sub_norm_all.str.contains(r"\btmanual\b", na=False)
 
         # TAMBAHAN: TRANSFER (kolom J mengandung "transfer")
         m_tf_all = sub_norm_all.str.contains(r"\btransfer\b", na=False)
@@ -974,6 +975,7 @@ if go:
         s_gs_emoney_espay = tix.loc[m_go_show & m_emoney_all & bank_norm_all.eq("espay")].groupby(tix[date_col].dt.date, dropna=True)[tarif_col].sum()
         s_gs_varetail_espay = tix.loc[m_go_show & m_varetail_all & bank_norm_all.eq("espay")].groupby(tix[date_col].dt.date, dropna=True)[tarif_col].sum()
         s_gs_cash_asdp = tix.loc[m_go_show & m_cash_all & bank_norm_all.eq("asdp")].groupby(tix[date_col].dt.date, dropna=True)[tarif_col].sum()
+        s_gs_tmanual_asdp = tix.loc[m_go_show & m_tmanual_all & bank_norm_all.eq("asdp")].groupby(tix[date_col].dt.date, dropna=True)[tarif_col].sum()
 
         # ---------------- GO SHOW TRANSFER (BARU) ----------------
         # PT.POS variasi: "pt.pos", "pt pos", "ptpos", "pos"
@@ -1001,6 +1003,7 @@ if go:
             "E-MONEY - ESPAY": s_gs_emoney_espay.reindex(idx2, fill_value=0.0),
             "VIRTUAL ACCOUNT DAN GERAI RETAIL - ESPAY": s_gs_varetail_espay.reindex(idx2, fill_value=0.0),
             "CASH - ASDP": s_gs_cash_asdp.reindex(idx2, fill_value=0.0),
+            "TIKET MANUAL": s_gs_tmanual_asdp.reindex(idx2, fill_value=0.0),
         }
 
         # ---------------- ONLINE existing ----------------
