@@ -1517,7 +1517,7 @@ if "detail_tiket" in hasil:
     st.dataframe(_style_right(hasil["detail_tiket"]["table"]), use_container_width=True, hide_index=True)
 
 if "rekap_cocok" in hasil:
-    st.subheader("Rekap Cocok RK × Settlement Espay (Berbasis Settlement + RK)")
+    st.subheader("Detail Settlement x Rekening Koran Non BCA")
     st.caption(f"Periode tersimpan: {hasil['rekap_cocok']['periode']}")
     st.dataframe(_style_right(hasil["rekap_cocok"]["table"]), use_container_width=True, hide_index=True)
 
