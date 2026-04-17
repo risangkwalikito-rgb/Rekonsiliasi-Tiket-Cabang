@@ -1124,14 +1124,56 @@ if go:
             .reindex(idx_match, fill_value=0.0)
         )
 
+        # RK remark "tunai" -> kolom CASH
+        rk_cash_bca_ser = pd.Series(0.0, index=idx_match, dtype=float)
+        rk_cash_non_ser = pd.Series(0.0, index=idx_match, dtype=float)
+
+        if not rk_bca_df.empty:
+            rk_cash_tgl_bca = _find_col(rk_bca_df, ["Tanggal", "Date", "Tgl", "Transaction Date"])
+            rk_cash_amt_bca = _find_col(rk_bca_df, ["mutasi", "amount", "kredit", "credit", "cr"])
+            rk_cash_rem_bca = _find_col(rk_bca_df, ["Keterangan", "Remark", "Deskripsi", "Description"])
+            if rk_cash_tgl_bca and rk_cash_amt_bca and rk_cash_rem_bca:
+                rk_cash_bca = rk_bca_df.copy()
+                rk_cash_bca[rk_cash_tgl_bca] = rk_cash_bca[rk_cash_tgl_bca].apply(_to_date)
+                rk_cash_bca = rk_cash_bca[~rk_cash_bca[rk_cash_tgl_bca].isna()]
+                rk_cash_bca = rk_cash_bca[(rk_cash_bca[rk_cash_tgl_bca] >= month_start) & (rk_cash_bca[rk_cash_tgl_bca] <= month_end)]
+                rk_cash_bca_rem = rk_cash_bca[rk_cash_rem_bca].astype(str).str.strip().str.lower().str.strip('"').str.strip("'")
+                rk_cash_bca = rk_cash_bca[rk_cash_bca_rem.str.contains("tunai", na=False)]
+                rk_cash_bca[rk_cash_amt_bca] = _to_num(rk_cash_bca[rk_cash_amt_bca])
+                rk_cash_bca_ser = rk_cash_bca.groupby(rk_cash_bca[rk_cash_tgl_bca].dt.date, dropna=True)[rk_cash_amt_bca].sum().reindex(idx_match, fill_value=0.0)
+
+        if not rk_non_df.empty:
+            rk_cash_tgl_non = _find_col(rk_non_df, ["Date", "Tanggal", "Transaction Date", "Tgl"])
+            rk_cash_amt_non = _find_col(rk_non_df, ["credit", "kredit", "cr", "amount"])
+            rk_cash_rem_non = _find_col(rk_non_df, ["Remark", "Keterangan", "Description", "Deskripsi"])
+            if rk_cash_tgl_non and rk_cash_amt_non and rk_cash_rem_non:
+                rk_cash_non = rk_non_df.copy()
+                rk_cash_non[rk_cash_tgl_non] = rk_cash_non[rk_cash_tgl_non].apply(_to_date)
+                rk_cash_non = rk_cash_non[~rk_cash_non[rk_cash_tgl_non].isna()]
+                rk_cash_non = rk_cash_non[(rk_cash_non[rk_cash_tgl_non] >= month_start) & (rk_cash_non[rk_cash_tgl_non] <= month_end)]
+                rk_cash_non_rem = rk_cash_non[rk_cash_rem_non].astype(str).str.strip().str.lower().str.strip('"').str.strip("'")
+                rk_cash_non = rk_cash_non[rk_cash_non_rem.str.contains("tunai", na=False)]
+                rk_cash_non[rk_cash_amt_non] = _to_num(rk_cash_non[rk_cash_amt_non])
+                rk_cash_non_ser = rk_cash_non.groupby(rk_cash_non[rk_cash_tgl_non].dt.date, dropna=True)[rk_cash_amt_non].sum().reindex(idx_match, fill_value=0.0)
+
+        rk_cash_ser = (rk_cash_bca_ser + rk_cash_non_ser).reindex(idx_match, fill_value=0.0)
+
         # Match by date:
         # - kolom NON BCA memakai RK NON BCA
         # - kolom BCA memakai RK BCA
+        # - kolom CASH memakai RK remark mengandung "tunai"
         rk_non_date_has_value = uang_masuk_non_ser.reindex(idx_match, fill_value=0.0).to_numpy(dtype=float) != 0
         rk_bca_date_has_value = uang_masuk_bca_ser.reindex(idx_match, fill_value=0.0).to_numpy(dtype=float) != 0
+        rk_cash_date_has_value = rk_cash_ser.reindex(idx_match, fill_value=0.0).to_numpy(dtype=float) != 0
 
+        settlement_go_show_date_has_value = (
+            (gs_prepaid_ser + gs_non_bca_ser + gs_bca_ser)
+            .reindex(idx_match, fill_value=0.0)
+            .to_numpy(dtype=float)
+            != 0
+        )
         settlement_non_date_has_value = (
-            (gs_cash_ser + gs_non_bca_ser + on_non_bca_ser)
+            (gs_non_bca_ser + on_non_bca_ser)
             .reindex(idx_match, fill_value=0.0)
             .to_numpy(dtype=float)
             != 0
@@ -1143,12 +1185,13 @@ if go:
             != 0
         )
 
+        cocok_cash_mask = settlement_go_show_date_has_value & rk_cash_date_has_value
         cocok_non_mask = settlement_non_date_has_value & rk_non_date_has_value
         cocok_bca_mask = settlement_bca_date_has_value & rk_bca_date_has_value
 
         rekap_match = pd.DataFrame(index=idx_match)
         rekap_match["Tanggal Create"] = idx_match
-        rekap_match["GO SHOW - CASH"] = np.where(cocok_non_mask, gs_cash_ser.values, 0.0)
+        rekap_match["GO SHOW - CASH"] = np.where(cocok_cash_mask, rk_cash_ser.values, 0.0)
         rekap_match["GO SHOW - PREPAID"] = np.where(cocok_bca_mask, gs_prepaid_ser.values, 0.0)
         rekap_match["GO SHOW - NON BCA"] = np.where(cocok_non_mask, gs_non_bca_ser.values, 0.0)
         rekap_match["GO SHOW - BCA"] = np.where(cocok_bca_mask, gs_bca_ser.values, 0.0)
