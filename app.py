@@ -11,6 +11,7 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 from dateutil import parser as dtparser
+from openpyxl import load_workbook
 
 
 # ---------- Utilities ----------
@@ -574,6 +575,243 @@ def _month_selector() -> Tuple[int, int]:
     return year, month
 
 
+
+
+def _load_sharing_fee_template(uploaded_file) -> pd.DataFrame:
+    if not uploaded_file:
+        return pd.DataFrame()
+
+    try:
+        uploaded_file.seek(0)
+        wb = load_workbook(uploaded_file, data_only=True)
+    except Exception:
+        return pd.DataFrame()
+
+    target_name = "Contoh Tabel Deploy" if "Contoh Tabel Deploy" in wb.sheetnames else wb.sheetnames[0]
+    ws = wb[target_name]
+
+    rows = []
+    for r in range(3, ws.max_row + 1):
+        instrument = ws.cell(r, 2).value
+        channel = ws.cell(r, 8).value
+        if instrument is None and channel in (None, "", "TOTAL"):
+            continue
+        if instrument is None and channel is None:
+            continue
+        if str(channel).strip().upper() == "TOTAL":
+            continue
+
+        rows.append(
+            {
+                "No": ws.cell(r, 1).value,
+                "Instrument Pembayaran": instrument,
+                "Admin Fee": ws.cell(r, 3).value,
+                "Sharing Fee Include Tax (Untuk ASDP)": ws.cell(r, 4).value,
+                "Pajak": ws.cell(r, 5).value,
+                "Sharing Fee Exclude Tax (Untuk ASDP)": ws.cell(r, 6).value,
+                "Settlement (Hari Kerja)": ws.cell(r, 7).value,
+                "Channel": channel,
+            }
+        )
+
+    return pd.DataFrame(rows)
+
+
+def _month_name_id(month: int) -> str:
+    names = {
+        1: "Januari",
+        2: "Februari",
+        3: "Maret",
+        4: "April",
+        5: "Mei",
+        6: "Juni",
+        7: "Juli",
+        8: "Agustus",
+        9: "September",
+        10: "Oktober",
+        11: "November",
+        12: "Desember",
+    }
+    return names.get(int(month), str(month))
+
+
+def _sharing_fee_template_display(df: pd.DataFrame, sharing_date_labels: List[str], transaksi_label: str) -> pd.DataFrame:
+    if df is None or df.empty:
+        return pd.DataFrame()
+
+    out = df.copy()
+
+    money_cols = [
+        "Admin Fee",
+        "Sharing Fee Include Tax (Untuk ASDP)",
+        "Sharing Fee Exclude Tax (Untuk ASDP)",
+        "Sharing Fee Include PPN",
+        "HARGA JUAL",
+        "DPP 11/12 * HARGA JUAL",
+        "PPN 12% * DPP",
+        "TOTAL (Include PPN)",
+        "PPH 23 2% * HARGA JUAL",
+        "NILAI YANG DIBAYAR",
+    ]
+    count_cols = sharing_date_labels + ["TOTAL", transaksi_label]
+
+    for c in out.columns:
+        if c in money_cols:
+            out[c] = out[c].apply(_idr_fmt)
+        elif c == "Pajak":
+            out[c] = out[c].apply(lambda x: "-" if pd.isna(x) or x in ("", None) else f"{float(x):.0%}")
+        elif c in count_cols:
+            out[c] = out[c].apply(
+                lambda x: "-" if pd.isna(x) or x in ("", None) else str(int(round(float(x))))
+            )
+
+    return out
+
+
+def _build_sharing_fee_per_channel_table(
+    master_fee_df: pd.DataFrame,
+    settle_df: pd.DataFrame,
+    month_start: pd.Timestamp,
+    month_end: pd.Timestamp,
+    settle_date_col: Optional[str],
+    settle_amount_col: Optional[str],
+    channel_col: Optional[str],
+) -> Tuple[pd.DataFrame, pd.DataFrame]:
+    if (
+        master_fee_df is None
+        or master_fee_df.empty
+        or settle_df is None
+        or settle_df.empty
+        or not settle_date_col
+        or not settle_amount_col
+        or not channel_col
+    ):
+        return pd.DataFrame(), pd.DataFrame()
+
+    month_end_plus2 = month_end + pd.Timedelta(days=2)
+    sharing_dates = pd.date_range(month_start, month_end_plus2, freq="D")
+    sharing_date_labels = [d.strftime("%d/%m/%Y") for d in sharing_dates]
+    transaksi_label = f"Transaksi {_month_name_id(month_start.month)}"
+
+    sd = settle_df.copy()
+    sd[settle_date_col] = pd.to_datetime(sd[settle_date_col].apply(_to_date), errors="coerce")
+    sd = sd[~sd[settle_date_col].isna()]
+    sd = sd[(sd[settle_date_col] >= month_start) & (sd[settle_date_col] <= month_end_plus2)]
+    sd[settle_amount_col] = _to_num(sd[settle_amount_col])
+    sd = sd[sd[settle_amount_col] > 0].copy()
+
+    sd["__share_date__"] = sd[settle_date_col].dt.date
+    sd["__share_channel__"] = sd[channel_col].apply(_norm_token)
+
+    daily_count = (
+        sd.groupby(["__share_date__", "__share_channel__"], dropna=True)
+        .size()
+        .to_dict()
+    )
+
+    records = []
+    for _, row in master_fee_df.iterrows():
+        instrument = row.get("Instrument Pembayaran")
+        channel = row.get("Channel")
+        channel_norm = _norm_token(channel)
+        rec = {
+            "No": row.get("No"),
+            "Instrument Pembayaran": instrument,
+            "Admin Fee": row.get("Admin Fee"),
+            "Sharing Fee Include Tax (Untuk ASDP)": row.get("Sharing Fee Include Tax (Untuk ASDP)"),
+            "Pajak": row.get("Pajak"),
+            "Sharing Fee Exclude Tax (Untuk ASDP)": row.get("Sharing Fee Exclude Tax (Untuk ASDP)"),
+            "Settlement (Hari Kerja)": row.get("Settlement (Hari Kerja)"),
+            "Channel": channel,
+        }
+
+        total_count = 0
+        month_count = 0
+
+        for d, label in zip(sharing_dates, sharing_date_labels):
+            cnt = int(daily_count.get((d.date(), channel_norm), 0))
+
+            instrument_norm = _norm_str(instrument)
+            # Jaga perilaku contoh template khusus BCA.
+            if "periode 16 - 31 maret 2026" in instrument_norm and d.date() < pd.Timestamp("2026-03-16").date():
+                cnt = 0
+            if "periode 16 - 31 maret 2026" in instrument_norm and d.date() > pd.Timestamp("2026-03-31").date():
+                cnt = 0
+            if "periode 1 april 2026" in instrument_norm and d.date() < pd.Timestamp("2026-04-01").date():
+                cnt = 0
+
+            rec[label] = cnt
+            total_count += cnt
+            if month_start.date() <= d.date() <= month_end.date():
+                month_count += cnt
+
+        fee_include = float(_parse_money(row.get("Sharing Fee Include Tax (Untuk ASDP)")))
+        sharing_fee_include_ppn = fee_include * month_count
+        harga_jual = (100 / 111) * sharing_fee_include_ppn if sharing_fee_include_ppn else 0.0
+        dpp = (11 / 12) * harga_jual if harga_jual else 0.0
+        ppn = 0.12 * dpp if dpp else 0.0
+        total_include_ppn = harga_jual + ppn
+        pph23 = 0.02 * harga_jual if harga_jual else 0.0
+        nilai_dibayar = total_include_ppn - pph23
+
+        rec["TOTAL"] = total_count
+        rec[transaksi_label] = month_count
+        rec["Sharing Fee Include PPN"] = sharing_fee_include_ppn
+        rec["HARGA JUAL"] = harga_jual
+        rec["DPP 11/12 * HARGA JUAL"] = dpp
+        rec["PPN 12% * DPP"] = ppn
+        rec["TOTAL (Include PPN)"] = total_include_ppn
+        rec["PPH 23 2% * HARGA JUAL"] = pph23
+        rec["NILAI YANG DIBAYAR"] = nilai_dibayar
+
+        records.append(rec)
+
+    out = pd.DataFrame(records)
+
+    total_row = {"No": "", "Instrument Pembayaran": "TOTAL", "Admin Fee": "", "Sharing Fee Include Tax (Untuk ASDP)": "", "Pajak": "", "Sharing Fee Exclude Tax (Untuk ASDP)": "", "Settlement (Hari Kerja)": "", "Channel": ""}
+    for c in sharing_date_labels + ["TOTAL", transaksi_label]:
+        total_row[c] = float(out[c].sum()) if c in out.columns else 0.0
+    for c in [
+        "Sharing Fee Include PPN",
+        "HARGA JUAL",
+        "DPP 11/12 * HARGA JUAL",
+        "PPN 12% * DPP",
+        "TOTAL (Include PPN)",
+        "PPH 23 2% * HARGA JUAL",
+        "NILAI YANG DIBAYAR",
+    ]:
+        total_row[c] = float(out[c].sum()) if c in out.columns else 0.0
+
+    out = pd.concat([out, pd.DataFrame([total_row])], ignore_index=True)
+
+    ordered_cols = [
+        "No",
+        "Instrument Pembayaran",
+        "Admin Fee",
+        "Sharing Fee Include Tax (Untuk ASDP)",
+        "Pajak",
+        "Sharing Fee Exclude Tax (Untuk ASDP)",
+        "Settlement (Hari Kerja)",
+        "Channel",
+    ] + sharing_date_labels + [
+        "TOTAL",
+        transaksi_label,
+        "Sharing Fee Include PPN",
+        "HARGA JUAL",
+        "DPP 11/12 * HARGA JUAL",
+        "PPN 12% * DPP",
+        "TOTAL (Include PPN)",
+        "PPH 23 2% * HARGA JUAL",
+        "NILAI YANG DIBAYAR",
+    ]
+    out = out.loc[:, ordered_cols]
+
+    display_df = _sharing_fee_template_display(out, sharing_date_labels, transaksi_label)
+    top = [("", c) for c in ordered_cols[:8]] + [("ESPAY", c) for c in sharing_date_labels] + [("", c) for c in ordered_cols[8+len(sharing_date_labels):]]
+    display_df.columns = pd.MultiIndex.from_tuples(top)
+
+    return out, display_df
+
 # ---------- App ----------
 
 st.set_page_config(page_title="Rekonsiliasi Tiket vs Settlement", layout="wide")
@@ -606,6 +844,11 @@ with st.sidebar:
         "Settlement Dana (CSV/Excel/.zip)",
         type=["csv", "xls", "xlsx", "zip"],
         accept_multiple_files=True,
+    )
+    sharing_fee_file = st.file_uploader(
+        "Master Fee / Contoh Sharing Fee per Channel (Excel)",
+        type=["xlsx", "xlsm", "xltx", "xltm"],
+        accept_multiple_files=False,
     )
     st.divider()
     st.header("Rekening Koran (opsional, multi-file)")
@@ -1429,6 +1672,26 @@ if go:
 
 
     # ======================================================================
+    # ==========  PERHITUNGAN SHARING FEE PER CHANNEL (BARU)  ==============
+    # ======================================================================
+
+    sharing_fee_table = None
+
+    if sharing_fee_file is not None:
+        master_fee_df = _load_sharing_fee_template(sharing_fee_file)
+        _sharing_fee_raw, _sharing_fee_display = _build_sharing_fee_per_channel_table(
+            master_fee_df=master_fee_df,
+            settle_df=settle_df,
+            month_start=month_start,
+            month_end=month_end,
+            settle_date_col=s_date_E,
+            settle_amount_col=s_amt_L,
+            channel_col=s_prod_P,
+        )
+        if not _sharing_fee_display.empty:
+            sharing_fee_table = _sharing_fee_display
+
+    # ======================================================================
     # ========================  RINCIAN SELISIH ORDER ID  ===================
     # ======================================================================
 
@@ -1564,6 +1827,14 @@ if go:
     else:
         st.session_state["HASIL"].pop("detail_settlement", None)
 
+    if sharing_fee_table is not None:
+        st.session_state["HASIL"]["sharing_fee_channel"] = {
+            "periode": periode,
+            "table": sharing_fee_table,
+        }
+    else:
+        st.session_state["HASIL"].pop("sharing_fee_channel", None)
+
     if rincian_selisih_table is not None and rincian_selisih_excel_bytes is not None:
         st.session_state["HASIL"]["rincian_selisih"] = {
             "periode": periode,
@@ -1634,6 +1905,11 @@ if "rincian_selisih" in hasil:
         use_container_width=True,
         key="dl_rincian_selisih",
     )
+
+if "sharing_fee_channel" in hasil:
+    st.subheader("Perhitungan Sharing Fee per Channel")
+    st.caption(f"Periode tersimpan: {hasil['sharing_fee_channel']['periode']}")
+    st.dataframe(hasil["sharing_fee_channel"]["table"], use_container_width=True, hide_index=True)
 
 if not hasil:
     st.info("Silakan upload file, pilih bulan-tahun, lalu klik **Proses**.")
