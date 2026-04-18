@@ -928,7 +928,7 @@ if go:
             ("TYPE (kolom B)", type_main_col),
             ("BANK (kolom I)", bank_col),
             ("TIPE / SUB-TIPE (kolom J)", type_sub_col),
-            ("TANGGAL TIKET (Action lalu Created)", date_col),
+            ("TANGGAL TIKET (Action lalu Created fallback)", date_col),
             ("TARIF (kolom Y)", tarif_col),
             ("ST BAYAR / STATUS BAYAR", status_col),
         ]
@@ -957,8 +957,17 @@ if go:
         m_online = (main_norm_all == "online") | main_norm_all.str.contains(r"\bonline\b", na=False)
 
         m_prepaid_all = (sub_norm_all == "prepaid") | sub_norm_all.str.contains(r"\bprepaid\b", na=False)
-        m_emoney_all = (sub_norm_all == "e-money") | sub_norm_all.str.contains(r"\be[-\s]*money\b|\bemoney\b", na=False)
-        m_varetail_all = sub_norm_all.str.contains(r"virtual\s*account", na=False) & sub_norm_all.str.contains(r"gerai|retail", na=False)
+
+        # GO SHOW - ESPAY
+        # Rule revisi:
+        # - E-MONEY - ESPAY                -> kolom J = "e-Money"
+        # - VIRTUAL ACCOUNT DAN RETAIL... -> kolom J = "Virtual Account dan Gerai Retail"
+        m_emoney_all = sub_norm_all.isin({"e-money", "emoney"})
+        m_varetail_all = sub_norm_all.isin({
+            "virtual account dan gerai retail",
+            "virtual account & gerai retail",
+        })
+
         m_cash_all = (sub_norm_all == "cash") | sub_norm_all.str.contains(r"\bcash\b", na=False)
         m_tmanual_all = (sub_norm_all == "tmanual") | sub_norm_all.str.contains(r"\btmanual\b", na=False)
 
