@@ -685,7 +685,7 @@ if go:
         st.error("Kolom nominal 'Tarif' tidak ditemukan pada Tiket Detail.")
         st.stop()
 
-    t_stat = _find_col(tiket_df, ["St Bayar", "Status Bayar", "status", "status bayar"])
+    t_stat = _find_col(tiket_df, ["St Bayar", "Status Bayar", "status", "status bayar"]) or _col_by_letter(tiket_df, "AC")
     t_bank = _find_col(tiket_df, ["Bank", "Payment Channel", "channel", "payment method"])
     if t_stat is None or t_bank is None:
         st.error("Kolom 'St Bayar' atau 'Bank' tidak ditemukan pada Tiket Detail.")
@@ -921,7 +921,7 @@ if go:
     )
     date_col = "__ticket_date__"
     tarif_col = _find_col(tiket_df, ["Tarif", "tarif"]) or _col_by_letter_local(tiket_df, "Y")
-    status_col = _find_col(tiket_df, ["St Bayar", "Status Bayar", "status", "status bayar"])
+    status_col = _find_col(tiket_df, ["St Bayar", "Status Bayar", "status", "status bayar"]) or _col_by_letter_local(tiket_df, "AC")
 
     required_missing = [
         n for n, c in [
@@ -930,7 +930,7 @@ if go:
             ("TIPE / SUB-TIPE (kolom J)", type_sub_col),
             ("TANGGAL TIKET (Action lalu Created fallback)", date_col),
             ("TARIF (kolom Y)", tarif_col),
-            ("ST BAYAR / STATUS BAYAR", status_col),
+            ("ST BAYAR / STATUS BAYAR (kolom AC)", status_col),
         ]
         if c is None
     ]
@@ -945,7 +945,7 @@ if go:
         tix = tix[(tix[date_col] >= month_start) & (tix[date_col] <= month_end)]
 
         stat_norm = tix[status_col].apply(_norm_token)
-        tix = tix[stat_norm.eq("paid") | stat_norm.str.contains(r"paid", na=False)]
+        tix = tix[stat_norm.eq("paid")]
 
         main_norm_all = tix[type_main_col].apply(_norm_str)
         sub_norm_all = tix[type_sub_col].apply(_norm_str)
