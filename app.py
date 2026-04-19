@@ -631,8 +631,18 @@ def _sharing_fee_display(df: pd.DataFrame, date_labels: List[str]) -> pd.DataFra
     if df is None or df.empty:
         return pd.DataFrame()
     out = df.copy()
-    money_cols = ["Sharing Fee Include Tax", "Sharing Fee Exclude Tax"]
-    count_cols = date_labels + ["TOTAL"]
+    money_cols = [
+        "Sharing Fee Include Tax",
+        "Sharing Fee Exclude Tax",
+        "Sharing Fee incl PPN",
+        "Harga Jual",
+        "DPP 11/12 * Harga Jual",
+        "PPN 12% * DPP",
+        "Total",
+        "PPh 23 (2% * Harga Jual)",
+        "Nilai yang Ditagihkan",
+    ]
+    count_cols = date_labels + ["Total Transaksi"]
     for c in out.columns:
         if c in money_cols:
             out[c] = out[c].apply(_idr_fmt)
@@ -704,7 +714,23 @@ def _build_sharing_fee_per_channel_table(
             rec[label] = cnt
             total_count += cnt
 
-        rec["TOTAL"] = total_count
+        fee_include_tax = float(_parse_money(row.get("Sharing Fee Include Tax")))
+        sharing_fee_incl_ppn = total_count * fee_include_tax
+        harga_jual = (100 / 111) * sharing_fee_incl_ppn if sharing_fee_incl_ppn else 0.0
+        dpp = (11 / 12) * harga_jual if harga_jual else 0.0
+        ppn = 0.12 * dpp if dpp else 0.0
+        total_tagihan = harga_jual + ppn
+        pph23 = harga_jual * 0.02 if harga_jual else 0.0
+        nilai_ditagihkan = total_tagihan - pph23
+
+        rec["Total Transaksi"] = total_count
+        rec["Sharing Fee incl PPN"] = sharing_fee_incl_ppn
+        rec["Harga Jual"] = harga_jual
+        rec["DPP 11/12 * Harga Jual"] = dpp
+        rec["PPN 12% * DPP"] = ppn
+        rec["Total"] = total_tagihan
+        rec["PPh 23 (2% * Harga Jual)"] = pph23
+        rec["Nilai yang Ditagihkan"] = nilai_ditagihkan
         records.append(rec)
 
     out = pd.DataFrame(records)
@@ -716,7 +742,17 @@ def _build_sharing_fee_per_channel_table(
         "Sharing Fee Exclude Tax": "",
         "Channel": "",
     }
-    for c in sharing_date_labels + ["TOTAL"]:
+    for c in sharing_date_labels + ["Total Transaksi"]:
+        total_row[c] = float(out[c].sum()) if c in out.columns else 0.0
+    for c in [
+        "Sharing Fee incl PPN",
+        "Harga Jual",
+        "DPP 11/12 * Harga Jual",
+        "PPN 12% * DPP",
+        "Total",
+        "PPh 23 (2% * Harga Jual)",
+        "Nilai yang Ditagihkan",
+    ]:
         total_row[c] = float(out[c].sum()) if c in out.columns else 0.0
 
     out = pd.concat([out, pd.DataFrame([total_row])], ignore_index=True)
@@ -727,11 +763,20 @@ def _build_sharing_fee_per_channel_table(
         "Sharing Fee Include Tax",
         "Sharing Fee Exclude Tax",
         "Channel",
-    ] + sharing_date_labels + ["TOTAL"]
+    ] + sharing_date_labels + [
+        "Total Transaksi",
+        "Sharing Fee incl PPN",
+        "Harga Jual",
+        "DPP 11/12 * Harga Jual",
+        "PPN 12% * DPP",
+        "Total",
+        "PPh 23 (2% * Harga Jual)",
+        "Nilai yang Ditagihkan",
+    ]
     out = out.loc[:, ordered_cols]
 
     display_df = _sharing_fee_display(out, sharing_date_labels)
-    top = [("", c) for c in ordered_cols[:5]] + [("ESPAY", c) for c in sharing_date_labels] + [("", "TOTAL")]
+    top = [("", c) for c in ordered_cols[:5]] + [("ESPAY", c) for c in sharing_date_labels] + [("", c) for c in ordered_cols[5 + len(sharing_date_labels):]]
     display_df.columns = pd.MultiIndex.from_tuples(top)
 
     return out, display_df
