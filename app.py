@@ -1761,6 +1761,60 @@ if go:
         rincian_selisih_table = rincian_fmt
         rincian_selisih_excel_bytes = bio_gap.getvalue()
 
+    # ======================================================================
+    # ==========  INVESTIGATE ORDER ID SETTLED ; STATUS UNPAID  ============
+    # ======================================================================
+
+    investigate_unpaid_settled_table = None
+
+    t_order_invest = _find_col(tiket_df, ["Order ID", "OrderId", "Order No", "Order Number", "OrderID"])
+    s_order_invest = _find_col(settle_df, ["Order ID", "OrderId", "Order Number", "Order No", "OrderID", "order id"])
+
+    miss_invest = [n for n, c in [
+        ("Order ID Tiket Detail", t_order_invest),
+        ("Tanggal Tiket", t_date_action),
+        ("Status Bayar", t_stat),
+        ("Bank", t_bank),
+        ("Tarif", t_amt_tarif),
+        ("Order ID Settlement Dana", s_order_invest),
+    ] if c is None]
+
+    if miss_invest:
+        st.warning("Kolom untuk 'Investigate ORDER ID Settled ; Status UNPAID' belum lengkap: " + ", ".join(miss_invest))
+    else:
+        inv = tiket_df.copy()
+        inv[t_date_action] = pd.to_datetime(inv[t_date_action], errors="coerce")
+        inv = inv[~inv[t_date_action].isna()]
+        inv = inv[(inv[t_date_action] >= month_start) & (inv[t_date_action] <= month_end)].copy()
+
+        inv_bank_norm = inv[t_bank].apply(_norm_token)
+        inv_stat_norm = inv[t_stat].apply(_norm_token)
+        inv = inv[inv_bank_norm.eq("espay") & inv_stat_norm.eq("unpaid")].copy()
+
+        inv[t_amt_tarif] = _to_num(inv[t_amt_tarif])
+        inv["__order_key__"] = inv[t_order_invest].apply(_norm_order_id)
+        inv["ORDER ID"] = inv[t_order_invest].apply(lambda x: "" if pd.isna(x) else str(x).strip())
+        inv = inv[inv["__order_key__"].ne("")].copy()
+
+        settle_order_keys = (
+            settle_df[s_order_invest]
+            .apply(_norm_order_id)
+        )
+        settle_order_keys = set(settle_order_keys[settle_order_keys.ne("")].tolist())
+
+        inv = inv[inv["__order_key__"].isin(settle_order_keys)].copy()
+        inv = inv.sort_values([t_date_action, "ORDER ID"], ascending=[True, True], kind="stable")
+
+        if not inv.empty:
+            investigate_unpaid = pd.DataFrame({
+                "Tanggal": inv[t_date_action].dt.strftime("%Y-%m-%d"),
+                "ORDER ID": inv["ORDER ID"],
+                "Amount": inv[t_amt_tarif],
+            }).reset_index(drop=True)
+
+            investigate_unpaid["Amount"] = investigate_unpaid["Amount"].apply(_idr_fmt)
+            investigate_unpaid_settled_table = investigate_unpaid
+
     periode = f"{y}-{m:02d}"
     st.session_state["HASIL"]["rekon"] = {"periode": periode, "table": fmt, "excel_bytes": bio.getvalue()}
     if df2_fmt_mi is not None:
@@ -1801,6 +1855,14 @@ if go:
         }
     else:
         st.session_state["HASIL"].pop("sharing_fee_channel", None)
+
+    if investigate_unpaid_settled_table is not None and not investigate_unpaid_settled_table.empty:
+        st.session_state["HASIL"]["investigate_unpaid_settled"] = {
+            "periode": periode,
+            "table": investigate_unpaid_settled_table,
+        }
+    else:
+        st.session_state["HASIL"].pop("investigate_unpaid_settled", None)
 
     st.success("Proses selesai. Hasil tersimpan (klik download tidak perlu proses ulang).")
 
@@ -1868,6 +1930,11 @@ if "sharing_fee_channel" in hasil:
     st.subheader("Perhitungan Sharing Fee per Channel")
     st.caption(f"Periode tersimpan: {hasil['sharing_fee_channel']['periode']}")
     st.dataframe(_style_right(hasil["sharing_fee_channel"]["table"]), use_container_width=True, hide_index=True)
+
+if "investigate_unpaid_settled" in hasil:
+    st.subheader("Table Investigate ORDER ID Settled ; Status UNPAID")
+    st.caption(f"Periode tersimpan: {hasil['investigate_unpaid_settled']['periode']}")
+    st.dataframe(_style_right(hasil["investigate_unpaid_settled"]["table"]), use_container_width=True, hide_index=True)
 
 if not hasil:
     st.info("Silakan upload file, pilih bulan-tahun, lalu klik **Proses**.")
