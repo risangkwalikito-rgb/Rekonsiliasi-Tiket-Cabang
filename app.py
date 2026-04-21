@@ -1815,6 +1815,77 @@ if go:
             investigate_unpaid["Amount"] = investigate_unpaid["Amount"].apply(_idr_fmt)
             investigate_unpaid_settled_table = investigate_unpaid
 
+    # ======================================================================
+    # =====  REKON SELISIH TIKET DETAIL ESPAY SETELAH PENYESUAIAN UNPAID =====
+    # ======================================================================
+
+    rekon_adjust_unpaid_table = None
+
+    if "TIKET DETAIL ESPAY" in final.columns and "SETTLEMENT DANA ESPAY" in final.columns:
+        unpaid_adjust_series = pd.Series(0.0, index=idx, dtype=float)
+
+        if t_order_invest is not None and s_order_invest is not None:
+            inv_adj = tiket_df.copy()
+            inv_adj[t_date_action] = pd.to_datetime(inv_adj[t_date_action], errors="coerce")
+            inv_adj = inv_adj[~inv_adj[t_date_action].isna()]
+            inv_adj = inv_adj[(inv_adj[t_date_action] >= month_start) & (inv_adj[t_date_action] <= month_end)].copy()
+
+            inv_adj_bank_norm = inv_adj[t_bank].apply(_norm_token)
+            inv_adj_stat_norm = inv_adj[t_stat].apply(_norm_token)
+            inv_adj = inv_adj[inv_adj_bank_norm.eq("espay") & inv_adj_stat_norm.eq("unpaid")].copy()
+
+            inv_adj[t_amt_tarif] = _to_num(inv_adj[t_amt_tarif])
+            inv_adj["__order_key__"] = inv_adj[t_order_invest].apply(_norm_order_id)
+            inv_adj = inv_adj[inv_adj["__order_key__"].ne("")].copy()
+
+            settle_order_keys_adj = settle_df[s_order_invest].apply(_norm_order_id)
+            settle_order_keys_adj = set(settle_order_keys_adj[settle_order_keys_adj.ne("")].tolist())
+
+            inv_adj = inv_adj[inv_adj["__order_key__"].isin(settle_order_keys_adj)].copy()
+
+            if not inv_adj.empty:
+                unpaid_by_date = inv_adj.groupby(inv_adj[t_date_action].dt.date, dropna=True)[t_amt_tarif].sum()
+                unpaid_adjust_series = unpaid_by_date.reindex(idx, fill_value=0.0)
+
+        rekon_adjust = pd.DataFrame(index=idx)
+        rekon_adjust["TIKET DETAIL ESPAY"] = final["TIKET DETAIL ESPAY"].reindex(idx, fill_value=0.0).values
+        rekon_adjust["ADJUSTMENT UNPAID SETTLED"] = unpaid_adjust_series.values
+        rekon_adjust["TIKET DETAIL ESPAY SETELAH PENYESUAIAN"] = (
+            rekon_adjust["TIKET DETAIL ESPAY"] + rekon_adjust["ADJUSTMENT UNPAID SETTLED"]
+        )
+        rekon_adjust["SETTLEMENT DANA ESPAY"] = final["SETTLEMENT DANA ESPAY"].reindex(idx, fill_value=0.0).values
+        rekon_adjust["SELISIH SETELAH PENYESUAIAN"] = (
+            rekon_adjust["TIKET DETAIL ESPAY SETELAH PENYESUAIAN"] - rekon_adjust["SETTLEMENT DANA ESPAY"]
+        )
+
+        rekon_adjust_view = rekon_adjust.reset_index()
+        rekon_adjust_view = rekon_adjust_view.rename(columns={rekon_adjust_view.columns[0]: "TANGGAL"})
+        rekon_adjust_view.insert(0, "NO", range(1, len(rekon_adjust_view) + 1))
+
+        total_row_adjust = pd.DataFrame([{
+            "NO": "",
+            "TANGGAL": "TOTAL",
+            "TIKET DETAIL ESPAY": rekon_adjust["TIKET DETAIL ESPAY"].sum(),
+            "ADJUSTMENT UNPAID SETTLED": rekon_adjust["ADJUSTMENT UNPAID SETTLED"].sum(),
+            "TIKET DETAIL ESPAY SETELAH PENYESUAIAN": rekon_adjust["TIKET DETAIL ESPAY SETELAH PENYESUAIAN"].sum(),
+            "SETTLEMENT DANA ESPAY": rekon_adjust["SETTLEMENT DANA ESPAY"].sum(),
+            "SELISIH SETELAH PENYESUAIAN": rekon_adjust["SELISIH SETELAH PENYESUAIAN"].sum(),
+        }])
+
+        rekon_adjust_view = pd.concat([rekon_adjust_view, total_row_adjust], ignore_index=True)
+
+        rekon_adjust_fmt = rekon_adjust_view.copy()
+        for c in [
+            "TIKET DETAIL ESPAY",
+            "ADJUSTMENT UNPAID SETTLED",
+            "TIKET DETAIL ESPAY SETELAH PENYESUAIAN",
+            "SETTLEMENT DANA ESPAY",
+            "SELISIH SETELAH PENYESUAIAN",
+        ]:
+            rekon_adjust_fmt[c] = rekon_adjust_fmt[c].apply(_idr_fmt)
+
+        rekon_adjust_unpaid_table = rekon_adjust_fmt
+
     periode = f"{y}-{m:02d}"
     st.session_state["HASIL"]["rekon"] = {"periode": periode, "table": fmt, "excel_bytes": bio.getvalue()}
     if df2_fmt_mi is not None:
@@ -1863,6 +1934,14 @@ if go:
         }
     else:
         st.session_state["HASIL"].pop("investigate_unpaid_settled", None)
+
+    if rekon_adjust_unpaid_table is not None and not rekon_adjust_unpaid_table.empty:
+        st.session_state["HASIL"]["rekon_adjust_unpaid"] = {
+            "periode": periode,
+            "table": rekon_adjust_unpaid_table,
+        }
+    else:
+        st.session_state["HASIL"].pop("rekon_adjust_unpaid", None)
 
     st.success("Proses selesai. Hasil tersimpan (klik download tidak perlu proses ulang).")
 
@@ -1935,6 +2014,11 @@ if "investigate_unpaid_settled" in hasil:
     st.subheader("Table Investigate ORDER ID Settled ; Status UNPAID")
     st.caption(f"Periode tersimpan: {hasil['investigate_unpaid_settled']['periode']}")
     st.dataframe(_style_right(hasil["investigate_unpaid_settled"]["table"]), use_container_width=True, hide_index=True)
+
+if "rekon_adjust_unpaid" in hasil:
+    st.subheader("Rekon Selisih Tiket Detail Espay Setelah Penyesuaian Unpaid")
+    st.caption(f"Periode tersimpan: {hasil['rekon_adjust_unpaid']['periode']}")
+    st.dataframe(_style_right(hasil["rekon_adjust_unpaid"]["table"]), use_container_width=True, hide_index=True)
 
 if not hasil:
     st.info("Silakan upload file, pilih bulan-tahun, lalu klik **Proses**.")
