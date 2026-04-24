@@ -2,13 +2,16 @@ from __future__ import annotations
 
 import calendar
 import io
+import os
 import re
 import unicodedata
 import zipfile
 from typing import List, Optional, Tuple
 
+import msal
 import numpy as np
 import pandas as pd
+import requests
 import streamlit as st
 from dateutil import parser as dtparser
 
@@ -781,6 +784,255 @@ def _build_sharing_fee_per_channel_table(
 
     return out, display_df
 
+
+# ---------- Excel Online Sync (Microsoft Graph) ----------
+
+def _excel_col_letter(col_idx_1based: int) -> str:
+    n = int(col_idx_1based)
+    out = ""
+    while n > 0:
+        n, rem = divmod(n - 1, 26)
+        out = chr(65 + rem) + out
+    return out or "A"
+
+
+def _flatten_columns(df: pd.DataFrame) -> pd.DataFrame:
+    out = df.copy()
+    if isinstance(out.columns, pd.MultiIndex):
+        flat_cols = []
+        for tpl in out.columns.tolist():
+            parts = [str(x).strip() for x in tpl if str(x).strip() and str(x).strip().lower() != "nan"]
+            flat_cols.append(" | ".join(parts) if parts else "")
+        out.columns = flat_cols
+    else:
+        out.columns = [str(c).strip() for c in out.columns]
+    return out
+
+
+def _excel_cell_value(val):
+    if pd.isna(val):
+        return ""
+    if isinstance(val, (np.integer, int)):
+        return int(val)
+    if isinstance(val, (np.floating, float)):
+        return float(val)
+    if isinstance(val, (pd.Timestamp, np.datetime64)):
+        try:
+            return pd.to_datetime(val).strftime("%Y-%m-%d")
+        except Exception:
+            return str(val)
+    return str(val)
+
+
+def _df_to_excel_values(df: pd.DataFrame) -> list[list]:
+    out = _flatten_columns(df)
+    values = [list(out.columns)]
+    for _, row in out.iterrows():
+        values.append([_excel_cell_value(v) for v in row.tolist()])
+    return values
+
+
+def _sheet_name_for_key(key: str) -> str:
+    mapping = {
+        "rekon": "Hasil_Rekon",
+        "detail_tiket": "Detail_Tiket",
+        "detail_settlement": "Detail_Settlement",
+        "rincian_selisih": "Rincian_Selisih",
+        "sharing_fee_channel": "Sharing_Fee",
+        "investigate_unpaid_settled": "Investigate_UNPAID",
+        "rekon_adjust_unpaid": "Rekon_Adjust_Unpaid",
+    }
+    name = mapping.get(key, key)
+    name = re.sub(r"[:\\/?*\[\]]+", "_", name).strip()
+    return name[:31] if len(name) > 31 else name
+
+
+def _workbook_base_url(item_id: str, drive_id: str = "") -> str:
+    item_id = (item_id or "").strip()
+    drive_id = (drive_id or "").strip()
+    if drive_id:
+        return f"https://graph.microsoft.com/v1.0/drives/{drive_id}/items/{item_id}/workbook"
+    return f"https://graph.microsoft.com/v1.0/me/drive/items/{item_id}/workbook"
+
+
+def _graph_headers(token: str, session_id: Optional[str] = None) -> dict:
+    headers = {"Authorization": f"Bearer {token}"}
+    if session_id:
+        headers["Workbook-Session-Id"] = session_id
+    return headers
+
+
+def _graph_json_request(
+    method: str,
+    url: str,
+    token: str,
+    session_id: Optional[str] = None,
+    payload: Optional[dict] = None,
+    ok_statuses: tuple = (200,),
+) -> dict:
+    headers = _graph_headers(token, session_id=session_id)
+    resp = requests.request(
+        method=method,
+        url=url,
+        headers=headers,
+        json=payload,
+        timeout=90,
+    )
+    if resp.status_code not in ok_statuses:
+        body = resp.text[:1000]
+        raise RuntimeError(f"Graph API gagal ({resp.status_code}) untuk {method} {url}: {body}")
+    if not resp.text:
+        return {}
+    try:
+        return resp.json()
+    except Exception:
+        return {}
+
+
+def _excel_create_session(base_url: str, token: str, persist_changes: bool = True, retries: int = 2) -> str:
+    url = f"{base_url}/createSession"
+    payload = {"persistChanges": persist_changes}
+    last_error = None
+
+    for _ in range(retries + 1):
+        resp = requests.post(
+            url,
+            headers={**_graph_headers(token), "Content-Type": "application/json"},
+            json=payload,
+            timeout=90,
+        )
+        if resp.status_code in (200, 201):
+            data = resp.json()
+            session_id = data.get("id", "")
+            if session_id:
+                return session_id
+            last_error = f"createSession tidak mengembalikan session id: {resp.text[:500]}"
+        elif resp.status_code == 504:
+            last_error = "createSession timeout (504). Coba ulangi proses sinkron."
+            continue
+        else:
+            last_error = f"createSession gagal ({resp.status_code}): {resp.text[:500]}"
+
+    raise RuntimeError(last_error or "Gagal membuat workbook session.")
+
+
+def _excel_close_session(base_url: str, token: str, session_id: str) -> None:
+    try:
+        requests.post(
+            f"{base_url}/closeSession",
+            headers={**_graph_headers(token, session_id=session_id), "Content-Type": "application/json"},
+            timeout=60,
+        )
+    except Exception:
+        pass
+
+
+def _excel_ensure_sheet(base_url: str, token: str, session_id: str, sheet_name: str) -> None:
+    data = _graph_json_request(
+        "GET",
+        f"{base_url}/worksheets",
+        token,
+        session_id=session_id,
+        ok_statuses=(200,),
+    )
+    existing = {str(item.get("name", "")).strip() for item in data.get("value", [])}
+    if sheet_name in existing:
+        return
+
+    _graph_json_request(
+        "POST",
+        f"{base_url}/worksheets/add",
+        token,
+        session_id=session_id,
+        payload={"name": sheet_name},
+        ok_statuses=(200, 201),
+    )
+
+
+def _excel_clear_sheet(base_url: str, token: str, session_id: str, sheet_name: str) -> None:
+    try:
+        used = _graph_json_request(
+            "GET",
+            f"{base_url}/worksheets/{sheet_name}/usedRange(valuesOnly=true)",
+            token,
+            session_id=session_id,
+            ok_statuses=(200,),
+        )
+        address = str(used.get("address", "")).strip()
+        if "!" in address:
+            address = address.split("!", 1)[1]
+        address = address.replace("$", "")
+        if address:
+            _graph_json_request(
+                "POST",
+                f"{base_url}/worksheets/{sheet_name}/range(address='{address}')/clear",
+                token,
+                session_id=session_id,
+                payload={"applyTo": "All"},
+                ok_statuses=(200, 204),
+            )
+    except Exception:
+        # Sheet kosong / usedRange belum ada -> abaikan.
+        pass
+
+
+def _excel_write_values(base_url: str, token: str, session_id: str, sheet_name: str, values: list[list]) -> None:
+    if not values or not values[0]:
+        return
+    row_count = len(values)
+    col_count = len(values[0])
+    address = f"A1:{_excel_col_letter(col_count)}{row_count}"
+    _graph_json_request(
+        "PATCH",
+        f"{base_url}/worksheets/{sheet_name}/range(address='{address}')",
+        token,
+        session_id=session_id,
+        payload={"values": values},
+        ok_statuses=(200,),
+    )
+
+
+def _sync_results_to_excel_online(
+    hasil: dict,
+    access_token: str,
+    item_id: str,
+    drive_id: str = "",
+) -> list[str]:
+    if not hasil:
+        raise RuntimeError("Belum ada hasil yang bisa dikirim.")
+    if not access_token:
+        raise RuntimeError("Token Microsoft belum tersedia. Login dulu.")
+    if not item_id:
+        raise RuntimeError("Workbook Item ID belum diisi.")
+
+    base_url = _workbook_base_url(item_id=item_id, drive_id=drive_id)
+    session_id = _excel_create_session(base_url, access_token, persist_changes=True)
+    written_sheets = []
+
+    try:
+        for key, payload in hasil.items():
+            if not isinstance(payload, dict) or "table" not in payload:
+                continue
+            df = payload.get("table")
+            if df is None or getattr(df, "empty", False):
+                continue
+
+            sheet_name = _sheet_name_for_key(key)
+            values = _df_to_excel_values(df)
+            _excel_ensure_sheet(base_url, access_token, session_id, sheet_name)
+            _excel_clear_sheet(base_url, access_token, session_id, sheet_name)
+            _excel_write_values(base_url, access_token, session_id, sheet_name, values)
+            written_sheets.append(sheet_name)
+    finally:
+        _excel_close_session(base_url, access_token, session_id)
+
+    return written_sheets
+
+
+def _msal_public_client(client_id: str, tenant_id: str):
+    authority = f"https://login.microsoftonline.com/{tenant_id or 'organizations'}"
+    return msal.PublicClientApplication(client_id=client_id, authority=authority)
+
 # ---------- App ----------
 
 st.set_page_config(page_title="Rekonsiliasi Tiket vs Settlement", layout="wide")
@@ -801,6 +1053,12 @@ st.markdown(
 
 if "HASIL" not in st.session_state:
     st.session_state["HASIL"] = {}
+if "MS_DEVICE_FLOW" not in st.session_state:
+    st.session_state["MS_DEVICE_FLOW"] = None
+if "MS_ACCESS_TOKEN" not in st.session_state:
+    st.session_state["MS_ACCESS_TOKEN"] = ""
+if "MS_ACCOUNT" not in st.session_state:
+    st.session_state["MS_ACCOUNT"] = ""
 
 with st.sidebar:
     st.header("1) Upload Sumber (multi-file)")
@@ -2019,6 +2277,104 @@ if "rekon_adjust_unpaid" in hasil:
     st.subheader("Rekon Selisih Tiket Detail Espay Setelah Penyesuaian Unpaid")
     st.caption(f"Periode tersimpan: {hasil['rekon_adjust_unpaid']['periode']}")
     st.dataframe(_style_right(hasil["rekon_adjust_unpaid"]["table"]), use_container_width=True, hide_index=True)
+
+st.divider()
+st.subheader("Uji Coba Sinkronisasi ke Excel Online")
+st.caption("Opsi 2: hasil tetap diproses dulu di Streamlit, lalu dikirim ke Excel Online dengan tombol terpisah.")
+
+with st.expander("Pengaturan Microsoft Excel Online", expanded=False):
+    ms_tenant_id = st.text_input(
+        "Tenant ID / organizations",
+        value=os.getenv("MS_TENANT_ID", "organizations"),
+        help="Gunakan 'organizations' untuk akun Microsoft 365 kerja/sekolah jika tidak ingin mengisi tenant GUID.",
+        key="ms_tenant_id",
+    )
+    ms_client_id = st.text_input(
+        "Client ID (App Registration Microsoft Entra)",
+        value=os.getenv("MS_CLIENT_ID", ""),
+        key="ms_client_id",
+    )
+    ms_drive_id = st.text_input(
+        "Drive ID (opsional, untuk SharePoint/Drive tertentu)",
+        value=os.getenv("MS_DRIVE_ID", ""),
+        key="ms_drive_id",
+    )
+    ms_item_id = st.text_input(
+        "Workbook Item ID",
+        value=os.getenv("MS_EXCEL_ITEM_ID", ""),
+        key="ms_item_id",
+    )
+
+    st.caption(
+        "Butuh akun Microsoft 365 work/school. Workbook harus ada di OneDrive for Business, SharePoint, atau Group drive."
+    )
+
+    col_login_1, col_login_2 = st.columns(2)
+
+    with col_login_1:
+        if st.button("1) Mulai Login Microsoft", use_container_width=True, key="btn_ms_start_login"):
+            if not ms_client_id:
+                st.error("Client ID wajib diisi.")
+            else:
+                try:
+                    app_msal = _msal_public_client(ms_client_id, ms_tenant_id)
+                    flow = app_msal.initiate_device_flow(scopes=["Files.ReadWrite"])
+                    if "user_code" not in flow:
+                        raise RuntimeError(f"Gagal memulai device flow: {flow}")
+                    st.session_state["MS_DEVICE_FLOW"] = flow
+                    st.session_state["MS_ACCESS_TOKEN"] = ""
+                    st.session_state["MS_ACCOUNT"] = ""
+                    st.success("Device login dimulai. Ikuti kode dan link di bawah.")
+                except Exception as e:
+                    st.error(f"Gagal memulai login Microsoft: {e}")
+
+    with col_login_2:
+        if st.button("2) Selesaikan Login", use_container_width=True, key="btn_ms_finish_login"):
+            flow = st.session_state.get("MS_DEVICE_FLOW")
+            if not flow:
+                st.error("Mulai login dulu.")
+            elif not ms_client_id:
+                st.error("Client ID wajib diisi.")
+            else:
+                try:
+                    app_msal = _msal_public_client(ms_client_id, ms_tenant_id)
+                    result = app_msal.acquire_token_by_device_flow(flow)
+                    if "access_token" not in result:
+                        raise RuntimeError(result.get("error_description") or str(result))
+                    st.session_state["MS_ACCESS_TOKEN"] = result["access_token"]
+                    account_name = ""
+                    claims = result.get("id_token_claims") or {}
+                    account_name = claims.get("preferred_username") or claims.get("name") or ""
+                    st.session_state["MS_ACCOUNT"] = account_name
+                    st.success("Login Microsoft berhasil.")
+                except Exception as e:
+                    st.error(f"Gagal menyelesaikan login Microsoft: {e}")
+
+    flow = st.session_state.get("MS_DEVICE_FLOW")
+    if flow and flow.get("message") and not st.session_state.get("MS_ACCESS_TOKEN"):
+        st.info(flow["message"])
+
+    if st.session_state.get("MS_ACCESS_TOKEN"):
+        st.success(
+            "Token Microsoft aktif"
+            + (f" untuk {st.session_state['MS_ACCOUNT']}" if st.session_state.get("MS_ACCOUNT") else "")
+        )
+
+    if st.button("3) Kirim Semua Tabel ke Excel Online", use_container_width=True, key="btn_ms_sync"):
+        try:
+            written = _sync_results_to_excel_online(
+                hasil=hasil,
+                access_token=st.session_state.get("MS_ACCESS_TOKEN", ""),
+                item_id=ms_item_id,
+                drive_id=ms_drive_id,
+            )
+            if not written:
+                st.warning("Tidak ada tabel yang dikirim.")
+            else:
+                st.success("Sinkronisasi berhasil ke sheet: " + ", ".join(written))
+        except Exception as e:
+            st.error(f"Gagal sinkron ke Excel Online: {e}")
+
 
 if not hasil:
     st.info("Silakan upload file, pilih bulan-tahun, lalu klik **Proses**.")
