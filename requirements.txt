@@ -5,3 +5,6 @@ python-dateutil
 openpyxl
 xlrd
 pyexcel-xls
+
+msal
+requests
