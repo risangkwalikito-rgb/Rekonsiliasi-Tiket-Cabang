@@ -680,44 +680,34 @@ def _build_sharing_fee_per_channel_table(
     sd[settle_amount_col] = _to_num(sd[settle_amount_col])
     sd = sd[sd[settle_amount_col] > 0].copy()
 
-    merchant_amount_col = _find_col(
-        sd,
-        [
-            "Merchant Amount",
-            "MerchantAmount",
-            "Amount Merchant",
-            "Merchant Amt",
-        ],
-    )
     trx_fee_col = _find_col(
         sd,
         [
+            "Jumlah Trx Fee",
             "Trx Fee",
             "Transaction Fee",
             "Fee Transaksi",
             "TransactionFee",
             "TrxFee",
+            "Jumlah Fee",
         ],
     )
 
-    if merchant_amount_col is not None:
-        sd[merchant_amount_col] = _to_num(sd[merchant_amount_col])
-    else:
-        sd["__merchant_amount__"] = 0.0
-        merchant_amount_col = "__merchant_amount__"
-
+    # Revisi:
+    # Base perhitungan % untuk DANA / OVO / GOPAY =
+    # Settlement Amount + Trx Fee
     if trx_fee_col is not None:
         sd[trx_fee_col] = _to_num(sd[trx_fee_col])
     else:
         sd["__trx_fee__"] = 0.0
         trx_fee_col = "__trx_fee__"
 
-    sd["__merchant_plus_trx__"] = sd[merchant_amount_col] + sd[trx_fee_col]
+    sd["__settlement_plus_trx__"] = sd[settle_amount_col] + sd[trx_fee_col]
     sd["__share_date__"] = sd[settle_date_col].dt.date
     sd["__share_channel__"] = sd[channel_col].apply(_norm_token)
 
     daily_count = sd.groupby(["__share_date__", "__share_channel__"], dropna=True).size().to_dict()
-    daily_base_sum = sd.groupby(["__share_date__", "__share_channel__"], dropna=True)["__merchant_plus_trx__"].sum().to_dict()
+    daily_base_sum = sd.groupby(["__share_date__", "__share_channel__"], dropna=True)["__settlement_plus_trx__"].sum().to_dict()
 
     percent_channels = {
         _norm_token("DANA PAY"),
@@ -761,10 +751,14 @@ def _build_sharing_fee_per_channel_table(
             total_base_amount += base_amount
 
         fee_include_tax = float(_parse_money(row.get("Sharing Fee Include Tax")))
+        fee_exclude_tax = float(_parse_money(row.get("Sharing Fee Exclude Tax")))
+
         if channel_norm in percent_channels:
             sharing_fee_incl_ppn = total_base_amount * fee_include_tax
+            sharing_fee_excl_ppn = total_base_amount * fee_exclude_tax
         else:
             sharing_fee_incl_ppn = total_count * fee_include_tax
+            sharing_fee_excl_ppn = total_count * fee_exclude_tax
         harga_jual = (100 / 111) * sharing_fee_incl_ppn if sharing_fee_incl_ppn else 0.0
         dpp = (11 / 12) * harga_jual if harga_jual else 0.0
         ppn = 0.12 * dpp if dpp else 0.0
