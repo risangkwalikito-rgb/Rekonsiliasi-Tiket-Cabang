@@ -626,7 +626,7 @@ def _default_sharing_fee_master() -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
-def _sharing_fee_display(df: pd.DataFrame, date_labels: List[str]) -> pd.DataFrame:
+def _sharing_fee_display(df: pd.DataFrame, count_labels: List[str]) -> pd.DataFrame:
     if df is None or df.empty:
         return pd.DataFrame()
     out = df.copy()
@@ -641,7 +641,7 @@ def _sharing_fee_display(df: pd.DataFrame, date_labels: List[str]) -> pd.DataFra
         "PPh 23 (2% * Harga Jual)",
         "Nilai yang Ditagihkan",
     ]
-    count_cols = date_labels + ["Total Transaksi"]
+    count_cols = count_labels + ["Total Transaksi"]
     for c in out.columns:
         if c in money_cols:
             out[c] = out[c].apply(_idr_fmt)
@@ -669,14 +669,25 @@ def _build_sharing_fee_per_channel_table(
     ):
         return pd.DataFrame(), pd.DataFrame()
 
-    month_end_plus2 = month_end + pd.Timedelta(days=2)
-    sharing_dates = pd.date_range(month_start, month_end_plus2, freq="D")
-    sharing_date_labels = [d.strftime("%d/%m/%Y") for d in sharing_dates]
+    def _month_bounds(ts: pd.Timestamp) -> Tuple[pd.Timestamp, pd.Timestamp]:
+        start = pd.Timestamp(ts.year, ts.month, 1)
+        end = pd.Timestamp(ts.year, ts.month, calendar.monthrange(ts.year, ts.month)[1])
+        return start, end
+
+    next_month_start = (month_end + pd.offsets.MonthBegin(1)).normalize()
+    next_month_end = pd.Timestamp(
+        next_month_start.year,
+        next_month_start.month,
+        calendar.monthrange(next_month_start.year, next_month_start.month)[1],
+    )
+
+    col_curr = f"Total {month_start.strftime('%B %Y')}"
+    col_next = f"Total {next_month_start.strftime('%B %Y')}"
 
     sd = settle_df.copy()
     sd[settle_date_col] = pd.to_datetime(sd[settle_date_col].apply(_to_date), errors="coerce")
     sd = sd[~sd[settle_date_col].isna()]
-    sd = sd[(sd[settle_date_col] >= month_start) & (sd[settle_date_col] <= month_end_plus2)]
+    sd = sd[(sd[settle_date_col] >= month_start) & (sd[settle_date_col] <= next_month_end)]
     sd[settle_amount_col] = _to_num(sd[settle_amount_col])
     sd = sd[sd[settle_amount_col] > 0].copy()
 
@@ -692,22 +703,36 @@ def _build_sharing_fee_per_channel_table(
             "Jumlah Fee",
         ],
     )
+    merchant_code_col = _find_col(
+        sd,
+        [
+            "Merchant Code",
+            "MerchantCode",
+            "Kode Merchant",
+            "Merchant ID",
+            "Merchant Id",
+            "MID",
+            "Merchant",
+        ],
+    )
 
-    # Revisi:
-    # Base perhitungan % untuk DANA / OVO / GOPAY =
-    # Settlement Amount + Trx Fee
     if trx_fee_col is not None:
         sd[trx_fee_col] = _to_num(sd[trx_fee_col])
     else:
         sd["__trx_fee__"] = 0.0
         trx_fee_col = "__trx_fee__"
 
+    if merchant_code_col is not None:
+        sd["__merchant_code__"] = sd[merchant_code_col].astype(str).str.strip()
+    else:
+        sd["__merchant_code__"] = sd.index.astype(str)
+
     sd["__settlement_plus_trx__"] = sd[settle_amount_col] + sd[trx_fee_col]
-    sd["__share_date__"] = sd[settle_date_col].dt.date
+    sd["__share_month__"] = sd[settle_date_col].dt.to_period("M").astype(str)
     sd["__share_channel__"] = sd[channel_col].apply(_norm_token)
 
-    daily_count = sd.groupby(["__share_date__", "__share_channel__"], dropna=True).size().to_dict()
-    daily_base_sum = sd.groupby(["__share_date__", "__share_channel__"], dropna=True)["__settlement_plus_trx__"].sum().to_dict()
+    curr_key = month_start.strftime("%Y-%m")
+    next_key = next_month_start.strftime("%Y-%m")
 
     percent_channels = {
         _norm_token("DANA PAY"),
@@ -715,11 +740,41 @@ def _build_sharing_fee_per_channel_table(
         _norm_token("TOKOPEDIA ESPAY GOPAY"),
     }
 
+    def _apply_bca_period_rule(df_in: pd.DataFrame, instrument_text: str) -> pd.DataFrame:
+        out = df_in.copy()
+        instrument_norm = _norm_str(instrument_text)
+        if "periode 16 - 31 maret 2026" in instrument_norm:
+            out = out[
+                (out[settle_date_col] >= pd.Timestamp("2026-03-16"))
+                & (out[settle_date_col] <= pd.Timestamp("2026-03-31"))
+            ]
+        if "periode 1 april 2026" in instrument_norm:
+            out = out[out[settle_date_col] >= pd.Timestamp("2026-04-01")]
+        return out
+
+    def _count_month(df_in: pd.DataFrame) -> int:
+        return int(len(df_in))
+
+    def _fee_month(df_in: pd.DataFrame, channel_norm: str, fee_rate: float) -> float:
+        if df_in.empty:
+            return 0.0
+        if channel_norm in percent_channels:
+            # Rule revisi:
+            # hitung per Merchant Code dulu -> (Settlement Amount + Trx Fee) * rate
+            # round 0 / integer per merchant code -> baru jumlahkan per channel
+            per_merchant = (
+                df_in.groupby("__merchant_code__", dropna=False)["__settlement_plus_trx__"]
+                .sum()
+            )
+            return float(per_merchant.mul(fee_rate).round(0).sum())
+        return float(len(df_in) * fee_rate)
+
     records = []
     for _, row in master_fee_df.iterrows():
         instrument = row.get("Instrument Pembayaran")
         channel = row.get("Channel")
         channel_norm = _norm_token(channel)
+
         rec = {
             "No": row.get("No"),
             "Instrument Pembayaran": instrument,
@@ -728,37 +783,22 @@ def _build_sharing_fee_per_channel_table(
             "Channel": channel,
         }
 
-        total_count = 0
-        total_base_amount = 0.0
-        instrument_norm = _norm_str(instrument)
-
-        for d, label in zip(sharing_dates, sharing_date_labels):
-            cnt = int(daily_count.get((d.date(), channel_norm), 0))
-            base_amount = float(daily_base_sum.get((d.date(), channel_norm), 0.0))
-
-            if "periode 16 - 31 maret 2026" in instrument_norm and d.date() < pd.Timestamp("2026-03-16").date():
-                cnt = 0
-                base_amount = 0.0
-            if "periode 16 - 31 maret 2026" in instrument_norm and d.date() > pd.Timestamp("2026-03-31").date():
-                cnt = 0
-                base_amount = 0.0
-            if "periode 1 april 2026" in instrument_norm and d.date() < pd.Timestamp("2026-04-01").date():
-                cnt = 0
-                base_amount = 0.0
-
-            rec[label] = cnt
-            total_count += cnt
-            total_base_amount += base_amount
-
         fee_include_tax = float(_parse_money(row.get("Sharing Fee Include Tax")))
-        fee_exclude_tax = float(_parse_money(row.get("Sharing Fee Exclude Tax")))
 
-        if channel_norm in percent_channels:
-            sharing_fee_incl_ppn = total_base_amount * fee_include_tax
-            sharing_fee_excl_ppn = total_base_amount * fee_exclude_tax
-        else:
-            sharing_fee_incl_ppn = total_count * fee_include_tax
-            sharing_fee_excl_ppn = total_count * fee_exclude_tax
+        df_channel = sd[sd["__share_channel__"].eq(channel_norm)].copy()
+        df_channel = _apply_bca_period_rule(df_channel, str(instrument))
+
+        df_curr = df_channel[df_channel["__share_month__"].eq(curr_key)].copy()
+        df_next = df_channel[df_channel["__share_month__"].eq(next_key)].copy()
+
+        count_curr = _count_month(df_curr)
+        count_next = _count_month(df_next)
+        total_count = count_curr + count_next
+
+        fee_curr = _fee_month(df_curr, channel_norm, fee_include_tax)
+        fee_next = _fee_month(df_next, channel_norm, fee_include_tax)
+        sharing_fee_incl_ppn = fee_curr + fee_next
+
         harga_jual = (100 / 111) * sharing_fee_incl_ppn if sharing_fee_incl_ppn else 0.0
         dpp = (11 / 12) * harga_jual if harga_jual else 0.0
         ppn = 0.12 * dpp if dpp else 0.0
@@ -766,6 +806,8 @@ def _build_sharing_fee_per_channel_table(
         pph23 = harga_jual * 0.02 if harga_jual else 0.0
         nilai_ditagihkan = total_tagihan - pph23
 
+        rec[col_curr] = count_curr
+        rec[col_next] = count_next
         rec["Total Transaksi"] = total_count
         rec["Sharing Fee incl PPN"] = sharing_fee_incl_ppn
         rec["Harga Jual"] = harga_jual
@@ -784,19 +826,17 @@ def _build_sharing_fee_per_channel_table(
         "Sharing Fee Include Tax": "",
         "Sharing Fee Exclude Tax": "",
         "Channel": "",
+        col_curr: float(out[col_curr].sum()) if col_curr in out.columns else 0.0,
+        col_next: float(out[col_next].sum()) if col_next in out.columns else 0.0,
+        "Total Transaksi": float(out["Total Transaksi"].sum()) if "Total Transaksi" in out.columns else 0.0,
+        "Sharing Fee incl PPN": float(out["Sharing Fee incl PPN"].sum()) if "Sharing Fee incl PPN" in out.columns else 0.0,
+        "Harga Jual": float(out["Harga Jual"].sum()) if "Harga Jual" in out.columns else 0.0,
+        "DPP 11/12 * Harga Jual": float(out["DPP 11/12 * Harga Jual"].sum()) if "DPP 11/12 * Harga Jual" in out.columns else 0.0,
+        "PPN 12% * DPP": float(out["PPN 12% * DPP"].sum()) if "PPN 12% * DPP" in out.columns else 0.0,
+        "Total": float(out["Total"].sum()) if "Total" in out.columns else 0.0,
+        "PPh 23 (2% * Harga Jual)": float(out["PPh 23 (2% * Harga Jual)"].sum()) if "PPh 23 (2% * Harga Jual)" in out.columns else 0.0,
+        "Nilai yang Ditagihkan": float(out["Nilai yang Ditagihkan"].sum()) if "Nilai yang Ditagihkan" in out.columns else 0.0,
     }
-    for c in sharing_date_labels + ["Total Transaksi"]:
-        total_row[c] = float(out[c].sum()) if c in out.columns else 0.0
-    for c in [
-        "Sharing Fee incl PPN",
-        "Harga Jual",
-        "DPP 11/12 * Harga Jual",
-        "PPN 12% * DPP",
-        "Total",
-        "PPh 23 (2% * Harga Jual)",
-        "Nilai yang Ditagihkan",
-    ]:
-        total_row[c] = float(out[c].sum()) if c in out.columns else 0.0
 
     out = pd.concat([out, pd.DataFrame([total_row])], ignore_index=True)
 
@@ -806,7 +846,8 @@ def _build_sharing_fee_per_channel_table(
         "Sharing Fee Include Tax",
         "Sharing Fee Exclude Tax",
         "Channel",
-    ] + sharing_date_labels + [
+        col_curr,
+        col_next,
         "Total Transaksi",
         "Sharing Fee incl PPN",
         "Harga Jual",
@@ -818,9 +859,9 @@ def _build_sharing_fee_per_channel_table(
     ]
     out = out.loc[:, ordered_cols]
 
-    display_df = _sharing_fee_display(out, sharing_date_labels)
-    top = [("", c) for c in ordered_cols[:5]] + [("ESPAY", c) for c in sharing_date_labels] + [("", c) for c in ordered_cols[5 + len(sharing_date_labels):]]
-    display_df.columns = pd.MultiIndex.from_tuples(top)
+    count_labels = [col_curr, col_next]
+    display_df = _sharing_fee_display(out, count_labels)
+    display_df.columns = pd.MultiIndex.from_tuples([("", c) for c in ordered_cols])
 
     return out, display_df
 
