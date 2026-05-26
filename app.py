@@ -583,13 +583,13 @@ def _default_sharing_fee_master() -> pd.DataFrame:
         {"No": "", "Instrument Pembayaran": "VA BCA ( Periode 1 April 2026 - Akhir Kerjasama)", "Sharing Fee Include Tax": 931, "Sharing Fee Exclude Tax": 839.7, "Channel": "BCA VA Online"},
         {"No": 3, "Instrument Pembayaran": "VA Mandiri", "Sharing Fee Include Tax": 360, "Sharing Fee Exclude Tax": 324.3243243243243, "Channel": "VA MANDIRI "},
         {"No": 4, "Instrument Pembayaran": "VA BNI", "Sharing Fee Include Tax": 111, "Sharing Fee Exclude Tax": 100, "Channel": "VA BNI"},
-        {"No": 5, "Instrument Pembayaran": "DANA", "Sharing Fee Include Tax": 0.002, "Sharing Fee Exclude Tax": 0.0018, "Channel": "DANA PAY"},
+        {"No": 5, "Instrument Pembayaran": "DANA", "Sharing Fee Include Tax": 0.0020, "Sharing Fee Exclude Tax": 0.0018, "Channel": "DANA PAY"},
         {"No": 6, "Instrument Pembayaran": "OVO", "Sharing Fee Include Tax": 0.0009, "Sharing Fee Exclude Tax": 0.0008, "Channel": "OVO"},
         {"No": 7, "Instrument Pembayaran": "VA BSI", "Sharing Fee Include Tax": 278, "Sharing Fee Exclude Tax": 250.45045045045046, "Channel": "VA Bank Syariah Indonesia"},
         {"No": 8, "Instrument Pembayaran": "VA Permata", "Sharing Fee Include Tax": 555, "Sharing Fee Exclude Tax": 500, "Channel": "VA PERMATA"},
         {"No": 9, "Instrument Pembayaran": "Shopee Pay", "Sharing Fee Include Tax": 13, "Sharing Fee Exclude Tax": 11, "Channel": "SHOPEEPAY JUMPAPP"},
         {"No": 10, "Instrument Pembayaran": "Link Aja", "Sharing Fee Include Tax": 388, "Sharing Fee Exclude Tax": 349, "Channel": "LinkAja Applink"},
-        {"No": 11, "Instrument Pembayaran": "Gopay", "Sharing Fee Include Tax": 0, "Sharing Fee Exclude Tax": 0, "Channel": "TOKOPEDIA ESPAY GOPAY"},
+        {"No": 11, "Instrument Pembayaran": "Gopay", "Sharing Fee Include Tax": 0.0017, "Sharing Fee Exclude Tax": 0.0015, "Channel": "TOKOPEDIA ESPAY GOPAY"},
         {"No": 12, "Instrument Pembayaran": "VA CIMB", "Sharing Fee Include Tax": 555, "Sharing Fee Exclude Tax": 500, "Channel": "VA CIMB Niaga"},
         {"No": 13, "Instrument Pembayaran": "VA BTN", "Sharing Fee Include Tax": 555, "Sharing Fee Exclude Tax": 500, "Channel": "VA BTN"},
         {"No": 14, "Instrument Pembayaran": "VA BJB", "Sharing Fee Include Tax": 0, "Sharing Fee Exclude Tax": 0, "Channel": "VA BJB"},
@@ -626,7 +626,7 @@ def _default_sharing_fee_master() -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
-def _sharing_fee_display(df: pd.DataFrame, period_labels: List[str]) -> pd.DataFrame:
+def _sharing_fee_display(df: pd.DataFrame, date_labels: List[str]) -> pd.DataFrame:
     if df is None or df.empty:
         return pd.DataFrame()
     out = df.copy()
@@ -641,12 +641,12 @@ def _sharing_fee_display(df: pd.DataFrame, period_labels: List[str]) -> pd.DataF
         "PPh 23 (2% * Harga Jual)",
         "Nilai yang Ditagihkan",
     ]
-    count_cols = period_labels + ["Total Transaksi"]
+    count_cols = date_labels + ["Total Transaksi"]
     for c in out.columns:
         if c in money_cols:
             out[c] = out[c].apply(_idr_fmt)
         elif c in count_cols:
-            out[c] = out[c].apply(lambda x: "-" if pd.isna(x) or x in ("", None, "") else str(int(round(float(x)))))
+            out[c] = out[c].apply(lambda x: "-" if pd.isna(x) or x in ("", None) else str(int(round(float(x)))))
     return out
 
 
@@ -671,17 +671,7 @@ def _build_sharing_fee_per_channel_table(
 
     month_end_plus2 = month_end + pd.Timedelta(days=2)
     sharing_dates = pd.date_range(month_start, month_end_plus2, freq="D")
-
-    month_keys = []
-    month_labels = []
-    seen = set()
-    for d in sharing_dates:
-        key = (int(d.year), int(d.month))
-        if key in seen:
-            continue
-        seen.add(key)
-        month_keys.append(key)
-        month_labels.append(f"Total {calendar.month_name[d.month]}")
+    sharing_date_labels = [d.strftime("%d/%m/%Y") for d in sharing_dates]
 
     sd = settle_df.copy()
     sd[settle_date_col] = pd.to_datetime(sd[settle_date_col].apply(_to_date), errors="coerce")
@@ -690,14 +680,50 @@ def _build_sharing_fee_per_channel_table(
     sd[settle_amount_col] = _to_num(sd[settle_amount_col])
     sd = sd[sd[settle_amount_col] > 0].copy()
 
-    sd["__share_year__"] = sd[settle_date_col].dt.year.astype(int)
-    sd["__share_month__"] = sd[settle_date_col].dt.month.astype(int)
+    merchant_amount_col = _find_col(
+        sd,
+        [
+            "Merchant Amount",
+            "MerchantAmount",
+            "Amount Merchant",
+            "Merchant Amt",
+        ],
+    )
+    trx_fee_col = _find_col(
+        sd,
+        [
+            "Trx Fee",
+            "Transaction Fee",
+            "Fee Transaksi",
+            "TransactionFee",
+            "TrxFee",
+        ],
+    )
+
+    if merchant_amount_col is not None:
+        sd[merchant_amount_col] = _to_num(sd[merchant_amount_col])
+    else:
+        sd["__merchant_amount__"] = 0.0
+        merchant_amount_col = "__merchant_amount__"
+
+    if trx_fee_col is not None:
+        sd[trx_fee_col] = _to_num(sd[trx_fee_col])
+    else:
+        sd["__trx_fee__"] = 0.0
+        trx_fee_col = "__trx_fee__"
+
+    sd["__merchant_plus_trx__"] = sd[merchant_amount_col] + sd[trx_fee_col]
+    sd["__share_date__"] = sd[settle_date_col].dt.date
     sd["__share_channel__"] = sd[channel_col].apply(_norm_token)
 
-    monthly_count = sd.groupby(
-        ["__share_year__", "__share_month__", "__share_channel__"],
-        dropna=True,
-    ).size().to_dict()
+    daily_count = sd.groupby(["__share_date__", "__share_channel__"], dropna=True).size().to_dict()
+    daily_base_sum = sd.groupby(["__share_date__", "__share_channel__"], dropna=True)["__merchant_plus_trx__"].sum().to_dict()
+
+    percent_channels = {
+        _norm_token("DANA PAY"),
+        _norm_token("OVO"),
+        _norm_token("TOKOPEDIA ESPAY GOPAY"),
+    }
 
     records = []
     for _, row in master_fee_df.iterrows():
@@ -713,34 +739,32 @@ def _build_sharing_fee_per_channel_table(
         }
 
         total_count = 0
+        total_base_amount = 0.0
         instrument_norm = _norm_str(instrument)
-        for (year, month), label in zip(month_keys, month_labels):
-            cnt = int(monthly_count.get((year, month, channel_norm), 0))
 
-            if "periode 16 - 31 maret 2026" in instrument_norm:
-                if (year, month) == (2026, 3):
-                    march_days = pd.date_range("2026-03-16", "2026-03-31", freq="D")
-                    cnt = 0
-                    for d in march_days:
-                        cnt += int(
-                            sd[
-                                (sd["__share_year__"] == d.year)
-                                & (sd["__share_month__"] == d.month)
-                                & (sd[settle_date_col].dt.date == d.date())
-                                & (sd["__share_channel__"] == channel_norm)
-                            ].shape[0]
-                        )
-                else:
-                    cnt = 0
+        for d, label in zip(sharing_dates, sharing_date_labels):
+            cnt = int(daily_count.get((d.date(), channel_norm), 0))
+            base_amount = float(daily_base_sum.get((d.date(), channel_norm), 0.0))
 
-            if "periode 1 april 2026" in instrument_norm and (year, month) < (2026, 4):
+            if "periode 16 - 31 maret 2026" in instrument_norm and d.date() < pd.Timestamp("2026-03-16").date():
                 cnt = 0
+                base_amount = 0.0
+            if "periode 16 - 31 maret 2026" in instrument_norm and d.date() > pd.Timestamp("2026-03-31").date():
+                cnt = 0
+                base_amount = 0.0
+            if "periode 1 april 2026" in instrument_norm and d.date() < pd.Timestamp("2026-04-01").date():
+                cnt = 0
+                base_amount = 0.0
 
             rec[label] = cnt
             total_count += cnt
+            total_base_amount += base_amount
 
         fee_include_tax = float(_parse_money(row.get("Sharing Fee Include Tax")))
-        sharing_fee_incl_ppn = total_count * fee_include_tax
+        if channel_norm in percent_channels:
+            sharing_fee_incl_ppn = total_base_amount * fee_include_tax
+        else:
+            sharing_fee_incl_ppn = total_count * fee_include_tax
         harga_jual = (100 / 111) * sharing_fee_incl_ppn if sharing_fee_incl_ppn else 0.0
         dpp = (11 / 12) * harga_jual if harga_jual else 0.0
         ppn = 0.12 * dpp if dpp else 0.0
@@ -767,7 +791,7 @@ def _build_sharing_fee_per_channel_table(
         "Sharing Fee Exclude Tax": "",
         "Channel": "",
     }
-    for c in month_labels + ["Total Transaksi"]:
+    for c in sharing_date_labels + ["Total Transaksi"]:
         total_row[c] = float(out[c].sum()) if c in out.columns else 0.0
     for c in [
         "Sharing Fee incl PPN",
@@ -788,7 +812,7 @@ def _build_sharing_fee_per_channel_table(
         "Sharing Fee Include Tax",
         "Sharing Fee Exclude Tax",
         "Channel",
-    ] + month_labels + [
+    ] + sharing_date_labels + [
         "Total Transaksi",
         "Sharing Fee incl PPN",
         "Harga Jual",
@@ -800,8 +824,8 @@ def _build_sharing_fee_per_channel_table(
     ]
     out = out.loc[:, ordered_cols]
 
-    display_df = _sharing_fee_display(out, month_labels)
-    top = [("", c) for c in ordered_cols[:5]] + [("ESPAY", c) for c in month_labels] + [("", c) for c in ordered_cols[5 + len(month_labels):]]
+    display_df = _sharing_fee_display(out, sharing_date_labels)
+    top = [("", c) for c in ordered_cols[:5]] + [("ESPAY", c) for c in sharing_date_labels] + [("", c) for c in ordered_cols[5 + len(sharing_date_labels):]]
     display_df.columns = pd.MultiIndex.from_tuples(top)
 
     return out, display_df
