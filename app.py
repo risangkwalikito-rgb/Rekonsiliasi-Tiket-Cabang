@@ -793,11 +793,17 @@ def _build_sharing_fee_per_channel_table(
 
         count_curr = _count_month(df_curr)
         count_next = _count_month(df_next)
-        total_count = count_curr + count_next
+
+        # Revisi:
+        # transaksi yang diakui untuk sharing fee hanya transaksi
+        # sesuai parameter bulan yang dipilih.
+        total_count = count_curr
 
         fee_curr = _fee_month(df_curr, channel_norm, fee_include_tax)
         fee_next = _fee_month(df_next, channel_norm, fee_include_tax)
-        sharing_fee_incl_ppn = fee_curr + fee_next
+
+        # Hanya bulan pilihan yang dipakai untuk perhitungan sharing fee.
+        sharing_fee_incl_ppn = fee_curr
 
         harga_jual = (100 / 111) * sharing_fee_incl_ppn if sharing_fee_incl_ppn else 0.0
         dpp = (11 / 12) * harga_jual if harga_jual else 0.0
