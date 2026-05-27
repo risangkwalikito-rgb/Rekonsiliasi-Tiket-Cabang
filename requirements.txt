@@ -8,3 +8,4 @@ pyexcel-xls
 
 msal
 requests
+reportlab
