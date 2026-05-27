@@ -11,6 +11,11 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 from dateutil import parser as dtparser
+from reportlab.lib import colors
+from reportlab.lib.pagesizes import A4
+from reportlab.lib.styles import getSampleStyleSheet
+from reportlab.lib.units import mm
+from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
 
 
 # ---------- Utilities ----------
@@ -2036,11 +2041,207 @@ if go:
     st.success("Proses selesai. Hasil tersimpan (klik download tidak perlu proses ulang).")
 
 
+
+def _pdf_norm_text(val) -> str:
+    if val is None:
+        return ""
+    s = str(val).strip()
+    return s
+
+
+def _flatten_summary_columns(df: pd.DataFrame) -> pd.DataFrame:
+    if df is None or df.empty:
+        return df
+    out = df.copy()
+    if isinstance(out.columns, pd.MultiIndex):
+        new_cols = []
+        for col in out.columns:
+            parts = [str(x).strip() for x in col if str(x).strip()]
+            new_cols.append(" | ".join(parts) if parts else "")
+        out.columns = new_cols
+    else:
+        out.columns = [str(c).strip() for c in out.columns]
+    return out
+
+
+def _find_total_row(df: pd.DataFrame) -> Optional[pd.Series]:
+    if df is None or df.empty:
+        return None
+    flat = _flatten_summary_columns(df)
+    for idx in range(len(flat) - 1, -1, -1):
+        row = flat.iloc[idx]
+        values = [_pdf_norm_text(v).upper() for v in row.tolist()]
+        if "TOTAL" in values:
+            return row
+    return None
+
+
+def _parse_display_money(val) -> float:
+    if val is None:
+        return 0.0
+    s = str(val).strip()
+    if not s or s == "-":
+        return 0.0
+    neg = False
+    if s.startswith("(") and s.endswith(")"):
+        neg = True
+        s = s[1:-1].strip()
+    s = s.replace(".", "").replace(",", ".")
+    s = re.sub(r"[^0-9\.\-]", "", s)
+    if not s:
+        return 0.0
+    try:
+        num = float(s)
+    except Exception:
+        return 0.0
+    return -num if neg else num
+
+
+def _format_pdf_money(val) -> str:
+    try:
+        n = float(val)
+    except Exception:
+        return _pdf_norm_text(val) or "-"
+    neg = n < 0
+    s = f"{abs(int(round(n))):,}".replace(",", ".")
+    return f"({s})" if neg else s
+
+
+def _table_summary_rows(title: str, df: pd.DataFrame) -> list[list[str]]:
+    flat = _flatten_summary_columns(df)
+    if flat is None or flat.empty:
+        return [[title, "Tidak ada data"]]
+
+    total_row = _find_total_row(flat)
+    if total_row is not None:
+        rows = []
+        for col, val in zip(flat.columns, total_row.tolist()):
+            col_name = str(col).strip()
+            if col_name in {"NO", "Tanggal", "TANGGAL", "ORDER ID", "STATUS", ""}:
+                continue
+            val_text = _pdf_norm_text(val)
+            if not val_text or val_text == "-":
+                continue
+            rows.append([col_name, val_text])
+        if rows:
+            return rows
+
+    if title == "Table Investigate ORDER ID Settled ; Status UNPAID":
+        amount_col = None
+        for c in flat.columns:
+            if str(c).strip().lower() == "amount":
+                amount_col = c
+                break
+        total_amount = 0.0
+        if amount_col is not None:
+            total_amount = flat[amount_col].apply(_parse_display_money).sum()
+        return [
+            ["Jumlah Baris", str(len(flat))],
+            ["Total Amount", _format_pdf_money(total_amount)],
+        ]
+
+    return [["Jumlah Baris", str(len(flat))]]
+
+
+def _build_pdf_summary(hasil: dict) -> bytes:
+    buffer = io.BytesIO()
+    doc = SimpleDocTemplate(
+        buffer,
+        pagesize=A4,
+        rightMargin=14 * mm,
+        leftMargin=14 * mm,
+        topMargin=14 * mm,
+        bottomMargin=14 * mm,
+    )
+    styles = getSampleStyleSheet()
+    story = []
+
+    periode = ""
+    for key in [
+        "rekon",
+        "detail_tiket",
+        "rekap_cocok",
+        "detail_settlement",
+        "rincian_selisih",
+        "sharing_fee_channel",
+        "investigate_unpaid_settled",
+        "rekon_adjust_unpaid",
+    ]:
+        if key in hasil and isinstance(hasil[key], dict) and hasil[key].get("periode"):
+            periode = hasil[key]["periode"]
+            break
+
+    story.append(Paragraph("Summary Rekonsiliasi Seluruh Tabel", styles["Title"]))
+    if periode:
+        story.append(Paragraph(f"Periode: {periode}", styles["Normal"]))
+    story.append(Spacer(1, 6 * mm))
+
+    ordered_sections = [
+        ("Hasil Rekonsiliasi per Tanggal", "rekon"),
+        ("Detail Tiket per Tanggal — TYPE: GO SHOW & ONLINE × SUB-TIPE (J) [HANYA PAID]", "detail_tiket"),
+        ("Detail Settlement x Rekening Koran saja", "rekap_cocok"),
+        ("DETAIL SETTLEMENT REPORT", "detail_settlement"),
+        ("RINCIAN SELISIH ORDER ID — Tiket Detail vs Settlement Dana", "rincian_selisih"),
+        ("Perhitungan Sharing Fee per Channel", "sharing_fee_channel"),
+        ("Table Investigate ORDER ID Settled ; Status UNPAID", "investigate_unpaid_settled"),
+        ("Rekon Selisih Tiket Detail Espay Setelah Penyesuaian Unpaid", "rekon_adjust_unpaid"),
+    ]
+
+    for title, key in ordered_sections:
+        if key not in hasil:
+            continue
+        table_df = hasil[key].get("table")
+        if table_df is None or getattr(table_df, "empty", True):
+            continue
+
+        story.append(Paragraph(title, styles["Heading3"]))
+        summary_rows = _table_summary_rows(title, table_df)
+        grid_data = [["Keterangan", "Nilai"]] + summary_rows
+
+        tbl = Table(grid_data, colWidths=[90 * mm, 80 * mm], repeatRows=1)
+        tbl.setStyle(
+            TableStyle(
+                [
+                    ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#D9EAF7")),
+                    ("TEXTCOLOR", (0, 0), (-1, 0), colors.black),
+                    ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+                    ("GRID", (0, 0), (-1, -1), 0.5, colors.grey),
+                    ("VALIGN", (0, 0), (-1, -1), "TOP"),
+                    ("ALIGN", (0, 0), (-1, 0), "CENTER"),
+                    ("ALIGN", (1, 1), (1, -1), "RIGHT"),
+                    ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.whitesmoke, colors.white]),
+                    ("LEFTPADDING", (0, 0), (-1, -1), 6),
+                    ("RIGHTPADDING", (0, 0), (-1, -1), 6),
+                    ("TOPPADDING", (0, 0), (-1, -1), 4),
+                    ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
+                ]
+            )
+        )
+        story.append(tbl)
+        story.append(Spacer(1, 5 * mm))
+
+    doc.build(story)
+    return buffer.getvalue()
+
+
+
 # =========================
 # RENDER HASIL TERSIMPAN
 # =========================
 
 hasil = st.session_state.get("HASIL", {})
+
+if hasil:
+    pdf_summary_bytes = _build_pdf_summary(hasil)
+    st.download_button(
+        "Unduh PDF Summary",
+        data=pdf_summary_bytes,
+        file_name=f"summary_rekon_{next((v.get('periode') for v in hasil.values() if isinstance(v, dict) and v.get('periode')), 'periode')}.pdf",
+        mime="application/pdf",
+        use_container_width=True,
+        key="dl_pdf_summary",
+    )
+
 
 if "rekon" in hasil:
     st.subheader("Hasil Rekonsiliasi per Tanggal (mengikuti bulan parameter)")
