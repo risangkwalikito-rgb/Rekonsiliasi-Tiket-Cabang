@@ -18,6 +18,31 @@ from reportlab.lib.units import mm
 from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
 
 
+BRANCH_TZ_MAP = {
+    "AMBON": "WIT",
+    "BAJOE": "WITA",
+    "BAKAUHENI": "WIB",
+    "BALIKPAPAN": "WITA",
+    "BANDA ACEH": "WIB",
+    "BANGKA": "WIB",
+    "BATAM": "WIB",
+    "BATULICIN": "WITA",
+    "BAU-BAU": "WITA",
+    "BITUNG": "WITA",
+    "KAYANGAN": "WITA",
+    "KETAPANG": "WIB",
+    "KUPANG": "WITA",
+    "LEMBAR": "WITA",
+    "LUWUK": "WITA",
+    "MERAK": "WIB",
+    "PADANG": "WIB",
+    "SAPE": "WITA",
+    "SELAYAR": "WITA",
+    "SIBOLGA": "WIB",
+    "SURABAYA": "WIB",
+    "TERNATE": "WIT",
+}
+
 # ---------- Utilities ----------
 
 def _parse_money(val) -> float:
