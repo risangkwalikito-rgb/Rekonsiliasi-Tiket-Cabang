@@ -881,6 +881,29 @@ def _build_sharing_fee_per_channel_table(
 st.set_page_config(page_title="Rekonsiliasi Tiket vs Settlement", layout="wide")
 st.title("Rekonsiliasi: Tiket Detail vs Settlement Dana")
 
+st.markdown(
+    """
+    <style>
+    div.stDownloadButton > button {
+        background-color: #d32f2f !important;
+        color: white !important;
+        border: 1px solid #b71c1c !important;
+        font-weight: 700 !important;
+    }
+    div.stDownloadButton > button:hover {
+        background-color: #b71c1c !important;
+        color: white !important;
+        border: 1px solid #8e0000 !important;
+    }
+    div.stDownloadButton > button:focus {
+        box-shadow: 0 0 0 0.2rem rgba(211, 47, 47, 0.25) !important;
+        color: white !important;
+    }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+
 # --- FORCE ALIGNMENT: angka kanan, NO center, TANGGAL kiri (UI Streamlit) ---
 st.markdown(
     """
