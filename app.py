@@ -899,6 +899,21 @@ st.markdown(
         box-shadow: 0 0 0 0.2rem rgba(211, 47, 47, 0.25) !important;
         color: white !important;
     }
+
+    /* Header tabel: hijau + bold */
+    div[data-testid="stDataFrame"] thead th,
+    div[data-testid="stDataFrame"] [role="columnheader"] {
+        background-color: #dff0e4 !important;
+        color: #1f3a2c !important;
+        font-weight: 700 !important;
+    }
+
+    /* Header grup untuk MultiIndex/kolom bertingkat */
+    div[data-testid="stDataFrame"] thead tr:first-child th {
+        background-color: #cfe8d6 !important;
+        color: #183024 !important;
+        font-weight: 700 !important;
+    }
     </style>
     """,
     unsafe_allow_html=True,
