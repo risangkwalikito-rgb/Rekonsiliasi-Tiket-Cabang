@@ -6,6 +6,7 @@ import re
 import unicodedata
 import zipfile
 from typing import List, Optional, Tuple
+from datetime import datetime
 
 import numpy as np
 import pandas as pd
@@ -13,8 +14,12 @@ import streamlit as st
 from dateutil import parser as dtparser
 from reportlab.lib import colors
 from reportlab.lib.pagesizes import A4
-from reportlab.lib.styles import getSampleStyleSheet
+from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib.units import mm
+from reportlab.lib.enums import TA_CENTER, TA_RIGHT
+from reportlab.graphics.shapes import Drawing, String
+from reportlab.graphics.charts.barcharts import VerticalBarChart, HorizontalBarChart
+from reportlab.graphics.charts.piecharts import Pie
 from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
 
 
@@ -2125,11 +2130,11 @@ if go:
 
 
 
+
 def _pdf_norm_text(val) -> str:
     if val is None:
         return ""
-    s = str(val).strip()
-    return s
+    return str(val).strip()
 
 
 def _flatten_summary_columns(df: pd.DataFrame) -> pd.DataFrame:
@@ -2190,6 +2195,126 @@ def _format_pdf_money(val) -> str:
     return f"({s})" if neg else s
 
 
+def _pdf_table(data: list[list[str]], col_widths=None, header_bg="#DDF0E3", right_align_last=True) -> Table:
+    tbl = Table(data, colWidths=col_widths, repeatRows=1)
+    style = [
+        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor(header_bg)),
+        ("TEXTCOLOR", (0, 0), (-1, 0), colors.HexColor("#173726")),
+        ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+        ("GRID", (0, 0), (-1, -1), 0.35, colors.HexColor("#BFCFC6")),
+        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+        ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.whitesmoke, colors.white]),
+        ("LEFTPADDING", (0, 0), (-1, -1), 5),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 5),
+        ("TOPPADDING", (0, 0), (-1, -1), 4),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
+    ]
+    if right_align_last and len(data[0]) >= 2:
+        style.append(("ALIGN", (1, 1), (-1, -1), "RIGHT"))
+    tbl.setStyle(TableStyle(style))
+    return tbl
+
+
+def _truncate_label(s: str, n: int = 18) -> str:
+    s = _pdf_norm_text(s)
+    return s if len(s) <= n else s[: n - 1] + "…"
+
+
+def _make_vertical_bar_chart(title: str, labels: list[str], values: list[float], width=175 * mm, height=62 * mm):
+    vals = [float(v) for v in values if float(v) >= 0]
+    if not vals or sum(vals) == 0:
+        return None
+
+    labels = [_truncate_label(x, 16) for x in labels]
+    d = Drawing(width, height + 16)
+    d.add(String(0, height + 4, title, fontName="Helvetica-Bold", fontSize=10, fillColor=colors.HexColor("#173726")))
+
+    chart = VerticalBarChart()
+    chart.x = 18
+    chart.y = 12
+    chart.height = height - 10
+    chart.width = width - 30
+    chart.data = [values]
+    chart.strokeColor = colors.transparent
+    chart.valueAxis.visible = True
+    chart.valueAxis.strokeColor = colors.HexColor("#9FB1A7")
+    chart.valueAxis.gridStrokeColor = colors.HexColor("#E5ECE8")
+    chart.valueAxis.labels.fontSize = 7
+    chart.valueAxis.labels.fillColor = colors.HexColor("#385447")
+    chart.categoryAxis.categoryNames = labels
+    chart.categoryAxis.labels.boxAnchor = "ne"
+    chart.categoryAxis.labels.angle = 25
+    chart.categoryAxis.labels.fontSize = 7
+    chart.categoryAxis.labels.fillColor = colors.HexColor("#385447")
+    chart.barWidth = 10
+    chart.groupSpacing = 8
+    chart.bars[0].fillColor = colors.HexColor("#5C9E7E")
+    chart.bars[0].strokeColor = colors.HexColor("#4C866B")
+    d.add(chart)
+    return d
+
+
+def _make_horizontal_bar_chart(title: str, labels: list[str], values: list[float], width=175 * mm, height=72 * mm):
+    pairs = [(str(l), float(v)) for l, v in zip(labels, values) if float(v) > 0]
+    if not pairs:
+        return None
+    pairs = sorted(pairs, key=lambda x: x[1], reverse=True)[:8]
+    pairs = list(reversed(pairs))
+    labels = [_truncate_label(x[0], 22) for x in pairs]
+    values = [x[1] for x in pairs]
+
+    d = Drawing(width, height + 18)
+    d.add(String(0, height + 6, title, fontName="Helvetica-Bold", fontSize=10, fillColor=colors.HexColor("#173726")))
+
+    chart = HorizontalBarChart()
+    chart.x = 72
+    chart.y = 10
+    chart.height = height - 8
+    chart.width = width - 82
+    chart.data = [values]
+    chart.strokeColor = colors.transparent
+    chart.valueAxis.visible = True
+    chart.valueAxis.strokeColor = colors.HexColor("#9FB1A7")
+    chart.valueAxis.gridStrokeColor = colors.HexColor("#E5ECE8")
+    chart.valueAxis.labels.fontSize = 7
+    chart.valueAxis.labels.fillColor = colors.HexColor("#385447")
+    chart.categoryAxis.categoryNames = labels
+    chart.categoryAxis.labels.fontSize = 7
+    chart.categoryAxis.labels.boxAnchor = "e"
+    chart.categoryAxis.labels.dx = -2
+    chart.bars[0].fillColor = colors.HexColor("#7BB66F")
+    chart.bars[0].strokeColor = colors.HexColor("#6AA25F")
+    chart.barHeight = 8
+    chart.groupSpacing = 5
+    d.add(chart)
+    return d
+
+
+def _make_pie_chart(title: str, labels: list[str], values: list[float], width=80 * mm, height=60 * mm):
+    pairs = [(str(l), float(v)) for l, v in zip(labels, values) if float(v) > 0]
+    if not pairs:
+        return None
+
+    d = Drawing(width, height + 18)
+    d.add(String(0, height + 4, title, fontName="Helvetica-Bold", fontSize=10, fillColor=colors.HexColor("#173726")))
+
+    pie = Pie()
+    pie.x = 10
+    pie.y = 0
+    pie.width = width - 20
+    pie.height = height
+    pie.data = [v for _, v in pairs]
+    pie.labels = [_truncate_label(l, 12) for l, _ in pairs]
+    pie.slices.strokeColor = colors.white
+    palette = ["#5C9E7E", "#F2C14E", "#77AADD", "#E07A5F"]
+    for i, _ in enumerate(pairs):
+        pie.slices[i].fillColor = colors.HexColor(palette[i % len(palette)])
+    pie.sideLabels = True
+    pie.simpleLabels = False
+    d.add(pie)
+    return d
+
+
 def _table_summary_rows(title: str, df: pd.DataFrame) -> list[list[str]]:
     flat = _flatten_summary_columns(df)
     if flat is None or flat.empty:
@@ -2226,17 +2351,120 @@ def _table_summary_rows(title: str, df: pd.DataFrame) -> list[list[str]]:
     return [["Jumlah Baris", str(len(flat))]]
 
 
+def _extract_total_map(df: pd.DataFrame) -> dict:
+    total_row = _find_total_row(df)
+    if total_row is None:
+        return {}
+    out = {}
+    flat = _flatten_summary_columns(df)
+    for col, val in zip(flat.columns, total_row.tolist()):
+        out[str(col).strip()] = _parse_display_money(val)
+    return out
+
+
+def _extract_top_selisih_rows(df: pd.DataFrame, limit: int = 7) -> list[list[str]]:
+    flat = _flatten_summary_columns(df)
+    if flat is None or flat.empty:
+        return []
+    if "TANGGAL" not in flat.columns:
+        # try lowercase fallback
+        for c in flat.columns:
+            if str(c).strip().lower() == "tanggal":
+                flat = flat.rename(columns={c: "TANGGAL"})
+                break
+    sel_col = None
+    for cand in ["SELISIH TIKET DETAIL - SETTLEMENT", "SELISIH SETELAH PENYESUAIAN", "SELISIH SETTLEMENT - UANG MASUK"]:
+        if cand in flat.columns:
+            sel_col = cand
+            break
+    if sel_col is None or "TANGGAL" not in flat.columns:
+        return []
+
+    work = flat.copy()
+    work = work[work["TANGGAL"].astype(str).str.upper() != "TOTAL"].copy()
+    work["__selisih__"] = work[sel_col].apply(_parse_display_money)
+    if work.empty:
+        return []
+    work["__abs__"] = work["__selisih__"].abs()
+    work = work.sort_values("__abs__", ascending=False).head(limit)
+
+    rows = []
+    for _, r in work.iterrows():
+        rows.append([
+            _pdf_norm_text(r.get("TANGGAL")),
+            _format_pdf_money(r.get("TIKET DETAIL ESPAY", 0)),
+            _format_pdf_money(r.get("SETTLEMENT DANA ESPAY", 0)),
+            _format_pdf_money(r.get(sel_col, 0)),
+        ])
+    return rows
+
+
+def _extract_top_sharing_channels(df: pd.DataFrame, limit: int = 8) -> tuple[list[str], list[float], list[list[str]]]:
+    flat = _flatten_summary_columns(df)
+    if flat is None or flat.empty:
+        return [], [], []
+    needed = ["Instrument Pembayaran", "Nilai yang Ditagihkan"]
+    if not all(c in flat.columns for c in needed):
+        return [], [], []
+
+    work = flat.copy()
+    if "Instrument Pembayaran" in work.columns:
+        work = work[work["Instrument Pembayaran"].astype(str).str.upper() != "TOTAL"].copy()
+    if work.empty:
+        return [], [], []
+
+    work["__nilai__"] = work["Nilai yang Ditagihkan"].apply(_parse_display_money)
+    work = work.sort_values("__nilai__", ascending=False).head(limit)
+
+    labels = work["Instrument Pembayaran"].astype(str).tolist()
+    values = work["__nilai__"].astype(float).tolist()
+    rows = [[lbl, _format_pdf_money(val)] for lbl, val in zip(labels, values)]
+    return labels, values, rows
+
+
 def _build_pdf_summary(hasil: dict) -> bytes:
     buffer = io.BytesIO()
     doc = SimpleDocTemplate(
         buffer,
         pagesize=A4,
-        rightMargin=14 * mm,
-        leftMargin=14 * mm,
-        topMargin=14 * mm,
-        bottomMargin=14 * mm,
+        rightMargin=12 * mm,
+        leftMargin=12 * mm,
+        topMargin=12 * mm,
+        bottomMargin=12 * mm,
     )
     styles = getSampleStyleSheet()
+    styles.add(
+        ParagraphStyle(
+            name="SummarySubtitle",
+            parent=styles["Normal"],
+            fontName="Helvetica",
+            fontSize=10,
+            textColor=colors.HexColor("#4C6557"),
+            leading=13,
+        )
+    )
+    styles.add(
+        ParagraphStyle(
+            name="SectionTitleGreen",
+            parent=styles["Heading2"],
+            fontName="Helvetica-Bold",
+            fontSize=12,
+            textColor=colors.HexColor("#173726"),
+            spaceAfter=6,
+            spaceBefore=6,
+        )
+    )
+    styles.add(
+        ParagraphStyle(
+            name="SmallMuted",
+            parent=styles["Normal"],
+            fontName="Helvetica",
+            fontSize=8.5,
+            textColor=colors.HexColor("#60756A"),
+            leading=11,
+        )
+    )
+
     story = []
 
     periode = ""
@@ -2254,20 +2482,144 @@ def _build_pdf_summary(hasil: dict) -> bytes:
             periode = hasil[key]["periode"]
             break
 
-    story.append(Paragraph("Summary Rekonsiliasi Seluruh Tabel", styles["Title"]))
-    if periode:
-        story.append(Paragraph(f"Periode: {periode}", styles["Normal"]))
-    story.append(Spacer(1, 6 * mm))
+    generated_at = datetime.now().strftime("%d/%m/%Y %H:%M")
 
+    header = Table(
+        [[Paragraph("Summary Rekonsiliasi Seluruh Tabel", styles["Title"])]],
+        colWidths=[186 * mm],
+    )
+    header.setStyle(
+        TableStyle(
+            [
+                ("BACKGROUND", (0, 0), (-1, -1), colors.HexColor("#DFF0E4")),
+                ("BOX", (0, 0), (-1, -1), 0.5, colors.HexColor("#BCD6C4")),
+                ("LEFTPADDING", (0, 0), (-1, -1), 10),
+                ("RIGHTPADDING", (0, 0), (-1, -1), 10),
+                ("TOPPADDING", (0, 0), (-1, -1), 8),
+                ("BOTTOMPADDING", (0, 0), (-1, -1), 8),
+            ]
+        )
+    )
+    story.append(header)
+    story.append(Spacer(1, 3 * mm))
+    story.append(Paragraph(f"Periode: {periode or '-'}", styles["SummarySubtitle"]))
+    story.append(Paragraph(f"Dibuat pada: {generated_at}", styles["SmallMuted"]))
+    story.append(Spacer(1, 5 * mm))
+
+    # Section 1: KPI Utama
+    story.append(Paragraph("1. Ringkasan Utama", styles["SectionTitleGreen"]))
+
+    recon_total = {}
+    if "rekon" in hasil:
+        recon_total = _extract_total_map(hasil["rekon"]["table"])
+
+    kpi_pairs = []
+    for label in [
+        "TIKET DETAIL ESPAY",
+        "SETTLEMENT DANA ESPAY",
+        "TOTAL SETTLEMENT",
+        "TOTAL UANG MASUK",
+        "SELISIH TIKET DETAIL - SETTLEMENT",
+        "SELISIH SETTLEMENT - UANG MASUK",
+    ]:
+        if label in recon_total:
+            kpi_pairs.append([label, _format_pdf_money(recon_total[label])])
+
+    if kpi_pairs:
+        kpi_grid = [["Keterangan", "Nilai"]] + kpi_pairs
+        story.append(_pdf_table(kpi_grid, col_widths=[104 * mm, 74 * mm]))
+        story.append(Spacer(1, 4 * mm))
+
+        chart_labels = []
+        chart_values = []
+        for label in [
+            "TIKET DETAIL ESPAY",
+            "SETTLEMENT DANA ESPAY",
+            "TOTAL SETTLEMENT",
+            "TOTAL UANG MASUK",
+        ]:
+            if label in recon_total:
+                chart_labels.append(label.replace("SETTLEMENT", "SETTL.").replace("TOTAL ", ""))
+                chart_values.append(recon_total[label])
+
+        chart_main = _make_vertical_bar_chart("Perbandingan Nilai Utama", chart_labels, chart_values)
+        if chart_main is not None:
+            story.append(chart_main)
+            story.append(Spacer(1, 3 * mm))
+
+        pie_labels = []
+        pie_values = []
+        for label in ["SETTLEMENT BCA", "SETTLEMENT NON BCA"]:
+            if label in recon_total and recon_total[label] > 0:
+                pie_labels.append(label.replace("SETTLEMENT ", ""))
+                pie_values.append(recon_total[label])
+        if pie_values:
+            pie = _make_pie_chart("Komposisi Settlement BCA vs Non BCA", pie_labels, pie_values)
+            if pie is not None:
+                story.append(pie)
+                story.append(Spacer(1, 4 * mm))
+
+    # Section 2: Tanggal dengan selisih terbesar
+    if "rekon" in hasil:
+        top_rows = _extract_top_selisih_rows(hasil["rekon"]["table"], limit=8)
+        if top_rows:
+            story.append(Paragraph("2. Tanggal dengan Selisih Terbesar", styles["SectionTitleGreen"]))
+            table_data = [["Tanggal", "Tiket Detail", "Settlement Dana", "Selisih"]] + top_rows
+            story.append(_pdf_table(table_data, col_widths=[32 * mm, 48 * mm, 48 * mm, 48 * mm]))
+            story.append(Spacer(1, 4 * mm))
+
+    # Section 3: Sharing Fee
+    if "sharing_fee_channel" in hasil:
+        story.append(Paragraph("3. Sharing Fee per Channel", styles["SectionTitleGreen"]))
+        sf_total = _extract_total_map(hasil["sharing_fee_channel"]["table"])
+        sf_rows = []
+        for label in ["Total Transaksi", "Sharing Fee incl PPN", "Total", "Nilai yang Ditagihkan"]:
+            if label in sf_total:
+                value = sf_total[label]
+                if label == "Total Transaksi":
+                    sf_rows.append([label, str(int(round(value)))])
+                else:
+                    sf_rows.append([label, _format_pdf_money(value)])
+        if sf_rows:
+            story.append(_pdf_table([["Keterangan", "Nilai"]] + sf_rows, col_widths=[104 * mm, 74 * mm]))
+            story.append(Spacer(1, 3 * mm))
+
+        sf_labels, sf_values, sf_rows_top = _extract_top_sharing_channels(hasil["sharing_fee_channel"]["table"])
+        chart_sf = _make_horizontal_bar_chart("Top Channel berdasarkan Nilai yang Ditagihkan", sf_labels, sf_values)
+        if chart_sf is not None:
+            story.append(chart_sf)
+            story.append(Spacer(1, 2 * mm))
+        if sf_rows_top:
+            story.append(_pdf_table([["Channel", "Nilai yang Ditagihkan"]] + sf_rows_top, col_widths=[118 * mm, 60 * mm]))
+            story.append(Spacer(1, 4 * mm))
+
+    # Section 4: Investigate & adjustment
+    extra_rows = []
+    if "investigate_unpaid_settled" in hasil:
+        flat_inv = _flatten_summary_columns(hasil["investigate_unpaid_settled"]["table"])
+        amount_total = 0.0
+        if flat_inv is not None and not flat_inv.empty and "Amount" in flat_inv.columns:
+            amount_total = flat_inv["Amount"].apply(_parse_display_money).sum()
+        extra_rows.append(["Investigate UNPAID settled", f"{len(flat_inv) if flat_inv is not None else 0} baris / {_format_pdf_money(amount_total)}"])
+
+    if "rekon_adjust_unpaid" in hasil:
+        adj_total = _extract_total_map(hasil["rekon_adjust_unpaid"]["table"])
+        if "ADJUSTMENT UNPAID SETTLED" in adj_total:
+            extra_rows.append(["Adjustment unpaid settled", _format_pdf_money(adj_total["ADJUSTMENT UNPAID SETTLED"])])
+        if "SELISIH SETELAH PENYESUAIAN" in adj_total:
+            extra_rows.append(["Selisih setelah penyesuaian", _format_pdf_money(adj_total["SELISIH SETELAH PENYESUAIAN"])])
+
+    if extra_rows:
+        story.append(Paragraph("4. Investigasi & Penyesuaian", styles["SectionTitleGreen"]))
+        story.append(_pdf_table([["Keterangan", "Nilai"]] + extra_rows, col_widths=[104 * mm, 74 * mm]))
+        story.append(Spacer(1, 4 * mm))
+
+    # Section 5: Snapshot tabel lain
+    story.append(Paragraph("5. Snapshot Ringkas Tabel Lain", styles["SectionTitleGreen"]))
     ordered_sections = [
-        ("Hasil Rekonsiliasi per Tanggal", "rekon"),
-        ("Detail Tiket per Tanggal — TYPE: GO SHOW & ONLINE × SUB-TIPE (J) [HANYA PAID]", "detail_tiket"),
         ("Detail Settlement x Rekening Koran saja", "rekap_cocok"),
         ("DETAIL SETTLEMENT REPORT", "detail_settlement"),
         ("RINCIAN SELISIH ORDER ID — Tiket Detail vs Settlement Dana", "rincian_selisih"),
-        ("Perhitungan Sharing Fee per Channel", "sharing_fee_channel"),
-        ("Table Investigate ORDER ID Settled ; Status UNPAID", "investigate_unpaid_settled"),
-        ("Rekon Selisih Tiket Detail Espay Setelah Penyesuaian Unpaid", "rekon_adjust_unpaid"),
     ]
 
     for title, key in ordered_sections:
@@ -2276,37 +2628,14 @@ def _build_pdf_summary(hasil: dict) -> bytes:
         table_df = hasil[key].get("table")
         if table_df is None or getattr(table_df, "empty", True):
             continue
-
-        story.append(Paragraph(title, styles["Heading3"]))
-        summary_rows = _table_summary_rows(title, table_df)
+        story.append(Paragraph(title, styles["SmallMuted"]))
+        summary_rows = _table_summary_rows(title, table_df)[:8]
         grid_data = [["Keterangan", "Nilai"]] + summary_rows
-
-        tbl = Table(grid_data, colWidths=[90 * mm, 80 * mm], repeatRows=1)
-        tbl.setStyle(
-            TableStyle(
-                [
-                    ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#D9EAF7")),
-                    ("TEXTCOLOR", (0, 0), (-1, 0), colors.black),
-                    ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
-                    ("GRID", (0, 0), (-1, -1), 0.5, colors.grey),
-                    ("VALIGN", (0, 0), (-1, -1), "TOP"),
-                    ("ALIGN", (0, 0), (-1, 0), "CENTER"),
-                    ("ALIGN", (1, 1), (1, -1), "RIGHT"),
-                    ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.whitesmoke, colors.white]),
-                    ("LEFTPADDING", (0, 0), (-1, -1), 6),
-                    ("RIGHTPADDING", (0, 0), (-1, -1), 6),
-                    ("TOPPADDING", (0, 0), (-1, -1), 4),
-                    ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
-                ]
-            )
-        )
-        story.append(tbl)
-        story.append(Spacer(1, 5 * mm))
+        story.append(_pdf_table(grid_data, col_widths=[104 * mm, 74 * mm], header_bg="#ECF7EF"))
+        story.append(Spacer(1, 3 * mm))
 
     doc.build(story)
     return buffer.getvalue()
-
-
 
 
 
