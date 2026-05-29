@@ -2284,7 +2284,7 @@ def _make_horizontal_bar_chart(title: str, labels: list[str], values: list[float
     chart.categoryAxis.labels.dx = -2
     chart.bars[0].fillColor = colors.HexColor("#7BB66F")
     chart.bars[0].strokeColor = colors.HexColor("#6AA25F")
-    chart.barHeight = 8
+    chart.barWidth = 8
     chart.groupSpacing = 5
     d.add(chart)
     return d
