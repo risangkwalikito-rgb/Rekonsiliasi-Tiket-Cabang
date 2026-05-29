@@ -2225,6 +2225,49 @@ def _build_pdf_summary(hasil: dict) -> bytes:
 
 
 
+
+
+def _safe_sheet_name(name: str) -> str:
+    cleaned = re.sub(r'[\\/*?:\[\]]+', "_", str(name)).strip()
+    cleaned = cleaned[:31] if cleaned else "Sheet"
+    return cleaned
+
+
+def _build_combined_excel_from_hasil(hasil: dict) -> bytes:
+    buffer = io.BytesIO()
+
+    sheet_map = [
+        ("rekon", "Rekonsiliasi"),
+        ("detail_tiket", "Detail_Tiket"),
+        ("rekap_cocok", "Detail_Settlement_x_RK"),
+        ("detail_settlement", "Detail_Settlement_Report"),
+        ("rincian_selisih", "Rincian_Selisih"),
+        ("sharing_fee_channel", "Sharing_Fee"),
+        ("investigate_unpaid_settled", "Investigate_Unpaid"),
+        ("rekon_adjust_unpaid", "Rekon_Adjust_Unpaid"),
+    ]
+
+    with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
+        wrote_any = False
+        for key, sheet_name in sheet_map:
+            if key not in hasil:
+                continue
+            table_df = hasil[key].get("table")
+            if table_df is None or getattr(table_df, "empty", True):
+                continue
+
+            out = _flatten_summary_columns(table_df)
+            out.to_excel(writer, index=False, sheet_name=_safe_sheet_name(sheet_name))
+            wrote_any = True
+
+        if not wrote_any:
+            pd.DataFrame({"Info": ["Tidak ada data"]}).to_excel(
+                writer, index=False, sheet_name="Summary"
+            )
+
+    return buffer.getvalue()
+
+
 # =========================
 # RENDER HASIL TERSIMPAN
 # =========================
@@ -2232,15 +2275,32 @@ def _build_pdf_summary(hasil: dict) -> bytes:
 hasil = st.session_state.get("HASIL", {})
 
 if hasil:
-    pdf_summary_bytes = _build_pdf_summary(hasil)
-    st.download_button(
-        "Unduh PDF Summary",
-        data=pdf_summary_bytes,
-        file_name=f"summary_rekon_{next((v.get('periode') for v in hasil.values() if isinstance(v, dict) and v.get('periode')), 'periode')}.pdf",
-        mime="application/pdf",
-        use_container_width=True,
-        key="dl_pdf_summary",
+    periode_file = next(
+        (v.get("periode") for v in hasil.values() if isinstance(v, dict) and v.get("periode")),
+        "periode",
     )
+    pdf_summary_bytes = _build_pdf_summary(hasil)
+    excel_summary_bytes = _build_combined_excel_from_hasil(hasil)
+
+    col_dl_1, col_dl_2 = st.columns(2)
+    with col_dl_1:
+        st.download_button(
+            "Unduh PDF Summary",
+            data=pdf_summary_bytes,
+            file_name=f"summary_rekon_{periode_file}.pdf",
+            mime="application/pdf",
+            use_container_width=True,
+            key="dl_pdf_summary",
+        )
+    with col_dl_2:
+        st.download_button(
+            "Unduh Excel Summary",
+            data=excel_summary_bytes,
+            file_name=f"summary_rekon_{periode_file}.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            use_container_width=True,
+            key="dl_excel_summary",
+        )
 
 
 if "rekon" in hasil:
@@ -2248,14 +2308,6 @@ if "rekon" in hasil:
     st.caption(f"Periode tersimpan: {hasil['rekon']['periode']}")
     st.dataframe(_style_right(hasil["rekon"]["table"]), use_container_width=True, hide_index=True)
 
-    st.download_button(
-        "Unduh Excel Rekonsiliasi",
-        data=hasil["rekon"]["excel_bytes"],
-        file_name=f"rekonsiliasi_{hasil['rekon']['periode']}.xlsx",
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        use_container_width=True,
-        key="dl_rekon",
-    )
 
 if "detail_tiket" in hasil:
     st.subheader("Detail Tiket per Tanggal — TYPE: GO SHOW & ONLINE × SUB-TIPE (J) [HANYA PAID]")
@@ -2272,14 +2324,6 @@ if "detail_settlement" in hasil:
     st.caption(f"Periode tersimpan: {hasil['detail_settlement']['periode']}")
     st.dataframe(_style_right(hasil["detail_settlement"]["table"]), use_container_width=True, hide_index=True)
 
-    st.download_button(
-        "Unduh Excel (Detail Settlement)",
-        data=hasil["detail_settlement"]["excel_bytes"],
-        file_name=f"detail_settlement_{hasil['detail_settlement']['periode']}.xlsx",
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        use_container_width=True,
-        key="dl_detail_settlement",
-    )
 
 
 if "rincian_selisih" in hasil:
@@ -2287,14 +2331,6 @@ if "rincian_selisih" in hasil:
     st.caption(f"Periode tersimpan: {hasil['rincian_selisih']['periode']}")
     st.dataframe(_style_right(hasil["rincian_selisih"]["table"]), use_container_width=True, hide_index=True)
 
-    st.download_button(
-        "Unduh Excel (Rincian Selisih)",
-        data=hasil["rincian_selisih"]["excel_bytes"],
-        file_name=f"rincian_selisih_{hasil['rincian_selisih']['periode']}.xlsx",
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        use_container_width=True,
-        key="dl_rincian_selisih",
-    )
 
 if "sharing_fee_channel" in hasil:
     st.subheader("Perhitungan Sharing Fee per Channel")
