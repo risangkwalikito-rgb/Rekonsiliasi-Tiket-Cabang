@@ -965,20 +965,26 @@ with st.sidebar:
     month_start = pd.Timestamp(y, m, 1)
     month_end = pd.Timestamp(y, m, calendar.monthrange(y, m)[1])
 
-    st.header("3) Zona Waktu untuk Created (fallback)")
-    ticket_tz_mode = st.selectbox(
-        "Zona waktu Created",
-        options=["WIB", "WITA", "WIT"],
-        index=0,
+    st.header("3) Parameter Cabang")
+    branch_options = list(BRANCH_TZ_MAP.keys())
+    default_branch = "PADANG" if "PADANG" in BRANCH_TZ_MAP else branch_options[0]
+    selected_branch = st.selectbox(
+        "Cabang",
+        options=branch_options,
+        index=branch_options.index(default_branch),
         help=(
-            "Hanya berlaku saat tanggal diambil dari Created karena Action kosong/tidak valid. "
-            "WIB: tidak ada penyesuaian. "
-            "WITA: jam 00:00:00-00:59:59 mundur 1 hari. "
-            "WIT: jam 00:00:00-01:59:59 mundur 1 hari."
+            "Zona waktu Created fallback mengikuti cabang. "
+            "Logic tetap sama: WIB tidak berubah, "
+            "WITA jam 00:00:00-00:59:59 mundur 1 hari, "
+            "WIT jam 00:00:00-01:59:59 mundur 1 hari."
         ),
     )
+    ticket_tz_mode = BRANCH_TZ_MAP.get(selected_branch, "WIB")
 
-    st.caption(f"Periode dipakai: {month_start.date()} s/d {month_end.date()} | Zona Created fallback: {ticket_tz_mode}")
+    st.caption(
+        f"Periode dipakai: {month_start.date()} s/d {month_end.date()} | "
+        f"Cabang: {selected_branch} | Zona Created fallback: {ticket_tz_mode}"
+    )
 
     go = st.button("Proses", type="primary", use_container_width=True)
 
