@@ -2645,6 +2645,12 @@ def _safe_sheet_name(name: str) -> str:
     return cleaned
 
 
+
+def _build_export_basename(branch_name: str, month_num: int, year_num: int) -> str:
+    month_label = MONTHS_ID.get(int(month_num), str(month_num))
+    return f"Rekonsiliasi_Ticketing Cabang_{branch_name}_{month_label}_{year_num}"
+
+
 def _build_combined_excel_from_hasil(hasil: dict) -> bytes:
     buffer = io.BytesIO()
 
@@ -2687,10 +2693,7 @@ def _build_combined_excel_from_hasil(hasil: dict) -> bytes:
 hasil = st.session_state.get("HASIL", {})
 
 if hasil:
-    periode_file = next(
-        (v.get("periode") for v in hasil.values() if isinstance(v, dict) and v.get("periode")),
-        "periode",
-    )
+    export_basename = _build_export_basename(selected_branch, m, y)
     pdf_summary_bytes = _build_pdf_summary(hasil)
     excel_summary_bytes = _build_combined_excel_from_hasil(hasil)
 
@@ -2699,7 +2702,7 @@ if hasil:
         st.download_button(
             "Unduh PDF Summary",
             data=pdf_summary_bytes,
-            file_name=f"summary_rekon_{periode_file}.pdf",
+            file_name=f"{export_basename}.pdf",
             mime="application/pdf",
             use_container_width=True,
             key="dl_pdf_summary",
@@ -2708,7 +2711,7 @@ if hasil:
         st.download_button(
             "Unduh Excel Summary",
             data=excel_summary_bytes,
-            file_name=f"summary_rekon_{periode_file}.xlsx",
+            file_name=f"{export_basename}.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             use_container_width=True,
             key="dl_excel_summary",
