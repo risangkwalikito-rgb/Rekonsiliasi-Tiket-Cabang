@@ -2647,7 +2647,8 @@ def _safe_sheet_name(name: str) -> str:
 
 
 def _build_export_basename(branch_name: str, month_num: int, year_num: int) -> str:
-    month_label = MONTHS_ID.get(int(month_num), str(month_num))
+    month_idx = int(month_num)
+    month_label = calendar.month_name[month_idx] if 1 <= month_idx <= 12 else str(month_num)
     return f"Rekonsiliasi_Ticketing Cabang_{branch_name}_{month_label}_{year_num}"
 
 
