@@ -609,8 +609,8 @@ def _month_selector() -> Tuple[int, int]:
 def _default_sharing_fee_master() -> pd.DataFrame:
     rows = [
         {"No": 1, "Instrument Pembayaran": "VA BRI", "Sharing Fee Include Tax": 389, "Sharing Fee Exclude Tax": 350.45045045045043, "Channel": "VA BRI"},
-        {"No": 2, "Instrument Pembayaran": "VA BCA ( Periode 16 - 31 Maret 2026)", "Sharing Fee Include Tax": 649, "Sharing Fee Exclude Tax": 584.6, "Channel": "BCA VA Online"},
-        {"No": "", "Instrument Pembayaran": "VA BCA ( Periode 1 April 2026 - Akhir Kerjasama)", "Sharing Fee Include Tax": 931, "Sharing Fee Exclude Tax": 839.7, "Channel": "BCA VA Online"},
+        {"No": 2, "Instrument Pembayaran": "VA BCA ( Periode 16 - 30 April 2026)", "Sharing Fee Include Tax": 649, "Sharing Fee Exclude Tax": 584.6, "Channel": "BCA VA Online"},
+        {"No": "", "Instrument Pembayaran": "VA BCA ( Periode 1 Mei 2026 - Akhir Kerjasama)", "Sharing Fee Include Tax": 931, "Sharing Fee Exclude Tax": 839.7, "Channel": "BCA VA Online"},
         {"No": 3, "Instrument Pembayaran": "VA Mandiri", "Sharing Fee Include Tax": 360, "Sharing Fee Exclude Tax": 324.3243243243243, "Channel": "VA MANDIRI "},
         {"No": 4, "Instrument Pembayaran": "VA BNI", "Sharing Fee Include Tax": 111, "Sharing Fee Exclude Tax": 100, "Channel": "VA BNI"},
         {"No": 5, "Instrument Pembayaran": "DANA", "Sharing Fee Include Tax": 0.0020, "Sharing Fee Exclude Tax": 0.0018, "Channel": "DANA PAY"},
@@ -773,13 +773,17 @@ def _build_sharing_fee_per_channel_table(
     def _apply_bca_period_rule(df_in: pd.DataFrame, instrument_text: str) -> pd.DataFrame:
         out = df_in.copy()
         instrument_norm = _norm_str(instrument_text)
-        if "periode 16 - 31 maret 2026" in instrument_norm:
+
+        # Revisi BCA VA Online:
+        # - fee 649 berlaku 16-30 April 2026
+        # - fee 931 berlaku mulai 1 Mei 2026
+        if "periode 16 - 30 april 2026" in instrument_norm:
             out = out[
-                (out[settle_date_col] >= pd.Timestamp("2026-03-16"))
-                & (out[settle_date_col] <= pd.Timestamp("2026-03-31"))
+                (out[settle_date_col] >= pd.Timestamp("2026-04-16"))
+                & (out[settle_date_col] <= pd.Timestamp("2026-04-30"))
             ]
-        if "periode 1 april 2026" in instrument_norm:
-            out = out[out[settle_date_col] >= pd.Timestamp("2026-04-01")]
+        if "periode 1 mei 2026" in instrument_norm:
+            out = out[out[settle_date_col] >= pd.Timestamp("2026-05-01")]
         return out
 
     def _count_month(df_in: pd.DataFrame) -> int:
