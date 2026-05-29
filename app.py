@@ -609,7 +609,7 @@ def _month_selector() -> Tuple[int, int]:
 def _default_sharing_fee_master() -> pd.DataFrame:
     rows = [
         {"No": 1, "Instrument Pembayaran": "VA BRI", "Sharing Fee Include Tax": 389, "Sharing Fee Exclude Tax": 350.45045045045043, "Channel": "VA BRI"},
-        {"No": 2, "Instrument Pembayaran": "VA BCA ( Periode 16 - 30 April 2026)", "Sharing Fee Include Tax": 649, "Sharing Fee Exclude Tax": 584.6, "Channel": "BCA VA Online"},
+        {"No": 2, "Instrument Pembayaran": "VA BCA ( Periode 16 Maret 2026 - 30 April 2026)", "Sharing Fee Include Tax": 649, "Sharing Fee Exclude Tax": 584.6, "Channel": "BCA VA Online"},
         {"No": "", "Instrument Pembayaran": "VA BCA ( Periode 1 Mei 2026 - Akhir Kerjasama)", "Sharing Fee Include Tax": 931, "Sharing Fee Exclude Tax": 839.7, "Channel": "BCA VA Online"},
         {"No": 3, "Instrument Pembayaran": "VA Mandiri", "Sharing Fee Include Tax": 360, "Sharing Fee Exclude Tax": 324.3243243243243, "Channel": "VA MANDIRI "},
         {"No": 4, "Instrument Pembayaran": "VA BNI", "Sharing Fee Include Tax": 111, "Sharing Fee Exclude Tax": 100, "Channel": "VA BNI"},
@@ -775,11 +775,11 @@ def _build_sharing_fee_per_channel_table(
         instrument_norm = _norm_str(instrument_text)
 
         # Revisi BCA VA Online:
-        # - fee 649 berlaku 16-30 April 2026
+        # - fee 649 berlaku 16 Maret 2026 s/d 30 April 2026
         # - fee 931 berlaku mulai 1 Mei 2026
-        if "periode 16 - 30 april 2026" in instrument_norm:
+        if "periode 16 maret 2026 - 30 april 2026" in instrument_norm:
             out = out[
-                (out[settle_date_col] >= pd.Timestamp("2026-04-16"))
+                (out[settle_date_col] >= pd.Timestamp("2026-03-16"))
                 & (out[settle_date_col] <= pd.Timestamp("2026-04-30"))
             ]
         if "periode 1 mei 2026" in instrument_norm:
