@@ -1669,6 +1669,10 @@ if go:
             + detail_settle["ON|VIRTUAL ACCOUNT - NON BCA"]
             + detail_settle["ON|E-MONEY"]
         )
+        detail_settle["GT|GRANDTOTAL"] = (
+            detail_settle["GS|Total Settlement (Go Show)"]
+            + detail_settle["ON|Total Settlement (Online)"]
+        )
 
         detail_settle = detail_settle[
             [
@@ -1680,6 +1684,7 @@ if go:
                 "ON|VIRTUAL ACCOUNT - NON BCA",
                 "ON|E-MONEY",
                 "ON|Total Settlement (Online)",
+                "GT|GRANDTOTAL",
             ]
         ]
 
@@ -1702,6 +1707,8 @@ if go:
                 return ("GO SHOW", col_name[3:])
             if col_name.startswith("ON|"):
                 return ("ONLINE", col_name[3:])
+            if col_name.startswith("GT|"):
+                return ("GRANDTOTAL", col_name[3:])
             return ("", col_name)
 
         ordered = list(detail_settle.columns)
@@ -1735,6 +1742,9 @@ if go:
                     sub_headers.append(str(c)[3:])
                 elif str(c).startswith("ON|"):
                     top_headers.append("ONLINE")
+                    sub_headers.append(str(c)[3:])
+                elif str(c).startswith("GT|"):
+                    top_headers.append("GRANDTOTAL")
                     sub_headers.append(str(c)[3:])
                 else:
                     top_headers.append("")
